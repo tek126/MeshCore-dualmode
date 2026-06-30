@@ -61,6 +61,36 @@ void HeltecV4Board::begin() {
     enterDeepSleep(0);
   }
 
+  void HeltecV4Board::hibernateButtonWake(int pin_btn) {
+    // Button-only hibernate. Unlike enterDeepSleep()/powerOff(), this does NOT
+    // arm the LoRa DIO1 wake source, so the node stays asleep through incoming
+    // mesh traffic and only the user button revives it.
+    //
+    // PIN_USER_BTN (GPIO0) is active-low, so we wake on it being driven LOW.
+    // It's also the BOOT strapping pin: wait for release before sleeping (so we
+    // don't wake instantly), and on wake a brief TAP is safest -- holding GPIO0
+    // through the reset can drop the chip into serial-download mode.
+    pinMode(pin_btn, INPUT_PULLUP);
+    unsigned long t0 = millis();
+    while (digitalRead(pin_btn) == LOW && (unsigned long)(millis() - t0) < 10000) {
+      delay(10);   // wait (<=10 s) for the user to let go
+    }
+
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+
+    // Keep the radio's SPI chip-select held so it stays quiescent during sleep.
+    rtc_gpio_hold_en((gpio_num_t)P_LORA_NSS);
+
+    // Arm the button (and only the button) as an RTC wake source on a LOW level.
+    rtc_gpio_init((gpio_num_t)pin_btn);
+    rtc_gpio_set_direction((gpio_num_t)pin_btn, RTC_GPIO_MODE_INPUT_ONLY);
+    rtc_gpio_pulldown_dis((gpio_num_t)pin_btn);
+    rtc_gpio_pullup_en((gpio_num_t)pin_btn);
+    esp_sleep_enable_ext1_wakeup((1ULL << pin_btn), ESP_EXT1_WAKEUP_ANY_LOW);
+
+    esp_deep_sleep_start();   // CPU halts here and never returns!
+  }
+
   uint16_t HeltecV4Board::getBattMilliVolts()  {
     analogReadResolution(10);
     digitalWrite(PIN_ADC_CTRL, HIGH);

@@ -101,6 +101,13 @@ void setup() {
 #ifdef WITH_MT_BEACON
   ui_task.setBeacon(the_mesh.getBeacon());
 #endif
+#ifdef WITH_CAR_NODE
+  ui_task.setCarNode(the_mesh.getCarNode());
+#endif
+#endif
+
+#ifdef WITH_CAR_NODE
+  user_btn.begin();   // hold-to-hibernate uses the shared MomentaryButton
 #endif
 
   // send out initial zero hop Advertisement to the mesh
@@ -154,6 +161,42 @@ void loop() {
     }
   } else {
     userBtnDownAt = 0;
+  }
+#endif
+
+#ifdef WITH_CAR_NODE
+  // Hold the user button for CAR_NODE_HOLD_OFF_MILLIS (~3 s) to hibernate the
+  // car node. The board enters its lowest-power state and does not return:
+  //   T114 -> sd_power_system_off(), wakes on the button / reset.
+  //   V4   -> button-only deep sleep (hibernateButtonWake): stays asleep through
+  //           LoRa traffic; tap the user button to wake (do not hold it).
+  #ifndef CAR_NODE_HOLD_OFF_MILLIS
+    #define CAR_NODE_HOLD_OFF_MILLIS 3000
+  #endif
+  {
+    static unsigned long carnode_btn_down_at = 0;
+    if (user_btn.isPressed()) {
+      if (carnode_btn_down_at == 0) {
+        carnode_btn_down_at = millis();
+      } else if ((unsigned long)(millis() - carnode_btn_down_at) >= CAR_NODE_HOLD_OFF_MILLIS) {
+        Serial.println("CarNode: hibernating (button held)...");
+      #if defined(DISPLAY_CLASS) && !defined(DUALMODE)
+        if (display.isOn()) {
+          display.startFrame();
+          display.setCursor(0, 0);
+          display.print("Hibernating...");
+          display.endFrame();
+        }
+      #endif
+      #if defined(HELTEC_LORA_V4)
+        board.hibernateButtonWake(PIN_USER_BTN);   // wake on button only (not LoRa RX)
+      #else
+        board.powerOff();   // does not return
+      #endif
+      }
+    } else {
+      carnode_btn_down_at = 0;
+    }
   }
 #endif
 

@@ -25,6 +25,8 @@ public:
   void onAfterTransmit(void) override;
   void enterDeepSleep(uint32_t secs, int pin_wake_btn = -1);
   void powerOff() override;
+  // Hibernate waking on the user button ONLY (no LoRa-RX wake) -- does not return.
+  void hibernateButtonWake(int pin_btn);
   uint16_t getBattMilliVolts() override;
   bool setAdcMultiplier(float multiplier) override {
     if (multiplier == 0.0f) {

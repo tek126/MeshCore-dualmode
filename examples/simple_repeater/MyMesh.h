@@ -39,6 +39,10 @@
 #include "MtBeaconControl.h"   // -I examples/meshtastic_beacon
 #endif
 
+#ifdef WITH_CAR_NODE
+#include "CarNodeControl.h"   // -I examples/car_node (+ -I examples/meshtastic_beacon)
+#endif
+
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
 #endif
@@ -79,6 +83,8 @@ struct NeighbourInfo {
 #ifndef FIRMWARE_VERSION
   #ifdef WITH_MT_BEACON
     #define FIRMWARE_VERSION   "v1.16.0+mtbeacon"
+  #elif defined(WITH_CAR_NODE)
+    #define FIRMWARE_VERSION   "v1.16.0+carnode"
   #else
     #define FIRMWARE_VERSION   "v1.16.0"
   #endif
@@ -99,6 +105,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   CommonCLI _cli;
 #ifdef WITH_MT_BEACON
   MtBeaconControl _beacon;
+#endif
+#ifdef WITH_CAR_NODE
+  CarNodeControl _carnode;
 #endif
   uint8_t reply_data[MAX_PACKET_PAYLOAD];
   uint8_t reply_path[MAX_PATH_SIZE];
@@ -198,6 +207,9 @@ public:
   NodePrefs* getNodePrefs() {
     return &_prefs;
   }
+#ifdef WITH_CAR_NODE
+  CarNodeControl* getCarNode() { return &_carnode; }
+#endif
 #ifdef WITH_MT_BEACON
   MtBeaconControl* getBeacon() { return &_beacon; }
 #endif

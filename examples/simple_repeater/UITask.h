@@ -6,6 +6,9 @@
 #ifdef WITH_MT_BEACON
 class MtBeaconControl;   // fwd decl; full include only in UITask.cpp
 #endif
+#ifdef WITH_CAR_NODE
+class CarNodeControl;    // fwd decl; full include only in UITask.cpp
+#endif
 
 class UITask {
   DisplayDriver* _display;
@@ -16,6 +19,9 @@ class UITask {
 #ifdef WITH_MT_BEACON
   MtBeaconControl* _beacon = nullptr;
 #endif
+#ifdef WITH_CAR_NODE
+  CarNodeControl* _carnode = nullptr;
+#endif
 
   void renderCurrScreen();
 public:
@@ -23,6 +29,9 @@ public:
   void begin(NodePrefs* node_prefs, const char* build_date, const char* firmware_version);
 #ifdef WITH_MT_BEACON
   void setBeacon(MtBeaconControl* b) { _beacon = b; }
+#endif
+#ifdef WITH_CAR_NODE
+  void setCarNode(CarNodeControl* c) { _carnode = c; }
 #endif
 
   void loop();

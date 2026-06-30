@@ -2,7 +2,7 @@
 #include "MyMesh.h"
 #include <algorithm>
 
-#ifdef WITH_MT_BEACON
+#if defined(WITH_MT_BEACON) || defined(WITH_CAR_NODE)
 extern RADIO_CLASS radio;   // concrete RadioLib radio (defined in the variant target.cpp)
 #endif
 
@@ -909,7 +909,11 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   StrHelper::strncpy(_prefs.bridge_secret, "LVSITANOS", sizeof(_prefs.bridge_secret));
 
   // GPS defaults
+#ifdef WITH_CAR_NODE
+  _prefs.gps_enabled = 1;   // mobile node: GPS on out of the box for live position
+#else
   _prefs.gps_enabled = 0;
+#endif
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
 
@@ -943,6 +947,15 @@ void MyMesh::begin(FILESYSTEM *fs) {
     uint32_t node = ((uint32_t)pk[0] << 24) | ((uint32_t)pk[1] << 16) | ((uint32_t)pk[2] << 8) | pk[3];
     uint32_t seed = ((uint32_t)pk[4] << 24) | ((uint32_t)pk[5] << 16) | ((uint32_t)pk[6] << 8) | pk[7];
     _beacon.begin(_fs, node, seed);
+  }
+#endif
+#ifdef WITH_CAR_NODE
+  // Derive a stable Meshtastic node number + starting packet id from our pubkey.
+  {
+    const uint8_t* pk = self_id.pub_key;
+    uint32_t node = ((uint32_t)pk[0] << 24) | ((uint32_t)pk[1] << 16) | ((uint32_t)pk[2] << 8) | pk[3];
+    uint32_t seed = ((uint32_t)pk[4] << 24) | ((uint32_t)pk[5] << 16) | ((uint32_t)pk[6] << 8) | pk[7];
+    _carnode.begin(_fs, node, seed);
   }
 #endif
   // TODO: key_store.begin();
@@ -1276,6 +1289,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   } else if (_beacon.handleCommand(command, reply, _fs)) {
     // handled by the Meshtastic beacon ("mtbeacon ..." verbs)
 #endif
+#ifdef WITH_CAR_NODE
+  } else if (_carnode.handleCommand(command, reply, _fs)) {
+    // handled by the mobile car-node beacon ("carnode ..." verbs)
+#endif
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1336,6 +1353,47 @@ void MyMesh::loop() {
     ctx.home_sync = MESHCORE_SYNC_WORD;
     ctx.home_tx_power = _prefs.tx_power_dbm;
     _beacon.tick(radio_driver, radio, busy, ctx);
+  }
+#endif
+
+#ifdef WITH_CAR_NODE
+  // Mobile beacon: announce our LIVE GPS position on Meshtastic when the mesh
+  // is idle, paced by movement. Restores the repeater's current radio params.
+  {
+    bool busy = hasPendingWork() || radio_driver.isReceiving();
+    CarNodeControl::Context ctx;
+    ctx.node_name = _prefs.node_name;
+    // Live fix from the sensor manager's GPS, falling back to configured location.
+    LocationProvider* loc = sensors.getLocationProvider();
+    if (loc && loc->isValid()) {
+      ctx.lat = sensors.node_lat;   // degrees, kept live by EnvironmentSensorManager::loop()
+      ctx.lon = sensors.node_lon;
+      ctx.gps_valid = true;
+    } else {
+      ctx.lat = _prefs.node_lat;
+      ctx.lon = _prefs.node_lon;
+      ctx.gps_valid = false;
+    }
+    ctx.epoch = getRTCClock()->getCurrentTime();
+    ctx.flood_advert_hours = _prefs.flood_advert_interval;   // paces the chat text
+    ctx.home_freq = _prefs.freq; ctx.home_bw = _prefs.bw;
+    ctx.home_sf = _prefs.sf;     ctx.home_cr = _prefs.cr;
+    ctx.home_sync = MESHCORE_SYNC_WORD;
+    ctx.home_tx_power = _prefs.tx_power_dbm;
+    _carnode.tick(radio_driver, radio, busy, ctx);
+
+    // When the car node decides the vehicle has parked, it pushes the *same* fix
+    // to MeshCore too: update our advert location and flood a fresh advert so the
+    // whole mesh learns where we stopped. (advert_loc_policy stays PREFS, so the
+    // advert reads these prefs.) Persisted so it survives a reboot while parked.
+    double rlat, rlon;
+    if (_carnode.takeReadvert(rlat, rlon)) {
+      _prefs.node_lat = rlat;
+      _prefs.node_lon = rlon;
+      savePrefs();
+      sendSelfAdvertisement(2000, true);   // flood re-advert with the parked location
+      updateFloodAdvertTimer();            // push the next periodic flood advert out
+    }
   }
 #endif
 
