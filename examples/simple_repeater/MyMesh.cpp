@@ -1,5 +1,10 @@
+#include "dualmode_rename.h"   // must precede MyMesh.h (renames classes under -D DUALMODE)
 #include "MyMesh.h"
 #include <algorithm>
+
+#ifdef WITH_MT_BEACON
+extern RADIO_CLASS radio;   // concrete RadioLib radio (defined in the variant target.cpp)
+#endif
 
 /* ------------------------------ Config -------------------------------- */
 
@@ -930,6 +935,16 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
   acl.load(_fs, self_id);
+
+#ifdef WITH_MT_BEACON
+  // Derive a stable Meshtastic node number + starting packet id from our pubkey.
+  {
+    const uint8_t* pk = self_id.pub_key;
+    uint32_t node = ((uint32_t)pk[0] << 24) | ((uint32_t)pk[1] << 16) | ((uint32_t)pk[2] << 8) | pk[3];
+    uint32_t seed = ((uint32_t)pk[4] << 24) | ((uint32_t)pk[5] << 16) | ((uint32_t)pk[6] << 8) | pk[7];
+    _beacon.begin(_fs, node, seed);
+  }
+#endif
   // TODO: key_store.begin();
   region_map.load(_fs);
 
@@ -1257,6 +1272,10 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+#ifdef WITH_MT_BEACON
+  } else if (_beacon.handleCommand(command, reply, _fs)) {
+    // handled by the Meshtastic beacon ("mtbeacon ..." verbs)
+#endif
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1300,6 +1319,25 @@ void MyMesh::loop() {
     acl.save(_fs);
     dirty_contacts_expiry = 0;
   }
+
+#ifdef WITH_MT_BEACON
+  // Time-slice a Meshtastic beacon onto the air when the mesh is idle. Restores
+  // the repeater's current radio params (incl. any temp override) afterwards.
+  {
+    bool busy = hasPendingWork() || radio_driver.isReceiving();
+    MtBeaconControl::Context ctx;
+    ctx.node_name = _prefs.node_name;
+    ctx.lat = _prefs.node_lat;
+    ctx.lon = _prefs.node_lon;
+    ctx.epoch = getRTCClock()->getCurrentTime();
+    ctx.flood_advert_hours = _prefs.flood_advert_interval;   // paces the chat text
+    ctx.home_freq = _prefs.freq; ctx.home_bw = _prefs.bw;
+    ctx.home_sf = _prefs.sf;     ctx.home_cr = _prefs.cr;
+    ctx.home_sync = MESHCORE_SYNC_WORD;
+    ctx.home_tx_power = _prefs.tx_power_dbm;
+    _beacon.tick(radio_driver, radio, busy, ctx);
+  }
+#endif
 
   // update uptime
   uint32_t now = millis();

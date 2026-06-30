@@ -101,7 +101,7 @@ MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store
 
 /* END GLOBAL OBJECTS */
 
-void halt() {
+static void halt() {
   while (1) ;
 }
 
@@ -111,7 +111,11 @@ void halt() {
   unsigned long last_wifi_reconnect_attempt = 0;
 #endif
 
+#ifdef DUALMODE
+void cmp_setup() {
+#else
 void setup() {
+#endif
   Serial.begin(115200);
 
   board.begin();
@@ -242,7 +246,11 @@ void setup() {
   board.onBootComplete();
 }
 
+#ifdef DUALMODE
+void cmp_loop() {
+#else
 void loop() {
+#endif
   the_mesh.loop();
   sensors.loop();
 #ifdef DISPLAY_CLASS

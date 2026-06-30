@@ -1,0 +1,35 @@
+# Meshtastic-beacon CI.
+# When you set up your Git repo, copy this to .github/workflows/mtbeacon-ci.yml.
+# It runs the host unit tests (fast, no hardware) and optionally a firmware build.
+name: mtbeacon
+
+on:
+  push:
+    paths:
+      - 'examples/meshtastic_beacon/**'
+      - 'examples/simple_repeater/**'
+      - 'variants/**/platformio.ini'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host unit tests (MeshtasticProto)
+        run: examples/meshtastic_beacon/test/run.sh
+
+  firmware-build:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.x' }
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build representative targets (SX1262 + LR1110)
+        run: |
+          pio run -e Heltec_t114_repeater_mtbeacon
+          pio run -e t1000e_meshtastic_beacon

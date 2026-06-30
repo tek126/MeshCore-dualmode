@@ -1,0 +1,35 @@
+# Dual-mode CI: host unit tests (for the bundled beacon) + the two T1000-E builds.
+name: dualmode
+
+on:
+  push:
+    paths:
+      - 'examples/dualmode/**'
+      - 'examples/meshtastic_beacon/**'
+      - 'examples/simple_repeater/**'
+      - 'examples/companion_radio/**'
+      - 'variants/t1000-e/platformio.ini'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host unit tests (bundled beacon)
+        run: examples/meshtastic_beacon/test/run.sh
+
+  build:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.x' }
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build T1000-E dual-mode (plain + beacon)
+        run: |
+          pio run -e t1000e_dualmode
+          pio run -e t1000e_dualmode_mtbeacon

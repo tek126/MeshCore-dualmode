@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T1000-E Dual-Mode (Companion + Repeater)</title>
+<meta name="description" content="One MeshCore firmware for the Seeed T1000-E that boots as either a BLE Companion or a Repeater, switched by a 5x button press. Compiled images and source.">
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --line:#2a323d;
+    --fg:#e6edf3; --mut:#9aa7b4; --acc:#4ea1ff; --ok:#3fb950; --warn:#d29922; --warnbg:#241c08;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+  a{color:var(--acc);text-decoration:none} a:hover{text-decoration:underline}
+  .wrap{max-width:920px;margin:0 auto;padding:0 20px}
+  header{padding:56px 0 28px;border-bottom:1px solid var(--line)}
+  h1{font-size:2.1rem;margin:0 0 6px;letter-spacing:-.02em}
+  .tag{color:var(--mut);font-size:1.1rem;margin:0}
+  .pills{margin-top:18px;display:flex;flex-wrap:wrap;gap:8px}
+  .pill{background:var(--panel2);border:1px solid var(--line);color:var(--mut);
+    border-radius:999px;padding:3px 12px;font-size:.82rem}
+  h2{font-size:1.35rem;margin:42px 0 14px;letter-spacing:-.01em}
+  h3{font-size:1.05rem;margin:26px 0 8px}
+  p{color:#cdd6df}
+  section{padding-top:6px}
+  .banner{margin:26px 0 0;background:var(--warnbg);border:1px solid #5a4410;
+    border-left:4px solid var(--warn);border-radius:8px;padding:14px 16px}
+  .banner b{color:var(--warn)}
+  code{font-family:var(--mono);font-size:.88em;background:var(--panel2);
+    border:1px solid var(--line);border-radius:5px;padding:1px 6px}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:14px 16px;overflow:auto}
+  pre code{background:none;border:none;padding:0;font-size:.86rem;color:#d6dee7}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:.93rem}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);font-weight:600;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em}
+  tbody tr:hover{background:#12171e}
+  .dl{display:inline-block;background:var(--acc);color:#04121f;font-weight:600;
+    border-radius:6px;padding:5px 12px;font-size:.85rem;white-space:nowrap}
+  .dl:hover{text-decoration:none;filter:brightness(1.08)}
+  .sub{color:var(--mut);font-size:.8rem}
+  .hash{font-family:var(--mono);font-size:.72rem;color:#6f7d8c;word-break:break-all}
+  footer{margin:60px 0 40px;padding-top:18px;border-top:1px solid var(--line);
+    color:var(--mut);font-size:.85rem}
+  ul{color:#cdd6df}
+  .steps li{margin:6px 0}
+</style>
+</head>
+<body>
+<header><div class="wrap">
+  <h1>T1000-E Dual-Mode</h1>
+  <p class="tag">One firmware for the Seeed T1000-E that is <em>both</em> a BLE Companion
+  and a Repeater — switch with a five-press of the button.</p>
+  <div class="pills">
+    <span class="pill">Seeed T1000-E &middot; nRF52840 + LR1110</span>
+    <span class="pill">Companion (BLE) &harr; Repeater</span>
+    <span class="pill">5&times; button to switch</span>
+    <span class="pill">optional Meshtastic beacon</span>
+  </div>
+</div></header>
+
+<div class="wrap">
+
+<div class="banner">
+  <b>&#9888; Experimental.</b> The dual-mode launcher is a work-in-progress add-on
+  (it co-compiles two apps and picks one at boot). Flashing is reversible — you can
+  return to any stock MeshCore image any time. The
+  <a href="https://github.com/tek126/MeshCore-dualmode/blob/main/examples/meshtastic_beacon/README.md">Meshtastic-beacon</a> variant is verified working
+  on-air (in Repeater mode).
+</div>
+
+<section>
+<h2>What it is</h2>
+<p>
+  Normally a T1000-E runs <em>one</em> role — you flash either the Companion
+  firmware (a BLE node you drive from the phone app) or the Repeater firmware.
+  This build contains <b>both</b> and chooses which to run at boot from a flag
+  saved in the internal filesystem. A small launcher owns startup and dispatches
+  to whichever app is selected; the two apps' identically-named classes coexist
+  because the repeater's are renamed (<code>MyMesh&rarr;RptMesh</code>,
+  <code>UITask&rarr;RptUITask</code>) when built with <code>-D DUALMODE</code>.
+</p>
+<ul>
+  <li><b>Companion mode</b> (default): BLE companion radio — pair from the MeshCore app.</li>
+  <li><b>Repeater mode</b>: a standard MeshCore repeater with serial CLI.</li>
+</ul>
+</section>
+
+<section>
+<h2>Switching modes</h2>
+<ol class="steps">
+  <li>Press the user button <b>five times</b> in quick succession.</li>
+  <li>The device confirms with the buzzer — <b>2 beeps = switching to Repeater</b>,
+      <b>1 beep = switching to Companion</b> — then reboots into the other mode.</li>
+  <li>The choice persists across reboots (stored at <code>/dualmode</code> in flash).</li>
+</ol>
+<p class="sub">The five-press count is otherwise unused by either app, so it
+doesn't collide with normal button actions. A button edge also wakes the device
+from the repeater's power-saving sleep so the press burst registers.</p>
+</section>
+
+<section>
+<h2>Downloads</h2>
+<p class="sub">Seeed T1000-E (nRF52840 + LR1110). Flash the <code>.zip</code> via the
+MeshCore web flasher or nRF52 DFU (see <a href="https://github.com/tek126/MeshCore-dualmode/blob/main/examples/meshtastic_beacon/README.md">the beacon page</a>
+for the DFU command). Built from MeshCore <code>e8d3c53</code>. Verify against <a href="https://github.com/tek126/MeshCore-dualmode/releases/latest/download/SHA256SUMS">SHA256SUMS</a>.</p>
+<table>
+  <thead><tr><th>Build</th><th>Repeater side</th><th>Image</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Dual-mode</td>
+      <td>standard repeater</td>
+      <td><a class="dl" href="https://github.com/tek126/MeshCore-dualmode/releases/latest/download/meshcore-t1000e-dualmode.zip">.zip · 408 KB</a></td>
+    </tr>
+    <tr>
+      <td>Dual-mode + Beacon</td>
+      <td>repeater runs the <a href="https://github.com/tek126/MeshCore-dualmode/blob/main/examples/meshtastic_beacon/README.md">Meshtastic beacon</a></td>
+      <td><a class="dl" href="https://github.com/tek126/MeshCore-dualmode/releases/latest/download/meshcore-t1000e-dualmode-mtbeacon.zip">.zip · 412 KB</a></td>
+    </tr>
+  </tbody>
+</table>
+</section>
+
+<section>
+<h2>Using the Meshtastic beacon in dual-mode</h2>
+<p>
+  In the <b>+ Beacon</b> build, the beacon is active only while the device is in
+  <b>Repeater mode</b>. Because the T1000-E has no screen, configure it from the
+  repeater's serial console (115200 baud) with the <code>mtbeacon</code> commands
+  — <code>mtbeacon on</code>, <code>mtbeacon interval 5</code>,
+  <code>mtbeacon send</code>, etc. Full command reference is on the
+  <a href="https://github.com/tek126/MeshCore-dualmode/blob/main/examples/meshtastic_beacon/README.md">beacon page</a>. Settings persist independently of
+  the dual-mode flag.
+</p>
+<p class="sub">Note: the on-screen <code>&lt; Repeater +Beacon &gt;</code> splash and
+live status line don't appear here — there's no display on the T1000-E, and the UI
+is disabled in dual-mode regardless. The beacon itself runs normally.</p>
+</section>
+
+<section id="source">
+<h2>Source</h2>
+<ul>
+  <li><a href="https://github.com/tek126/MeshCore-dualmode/tree/main/examples/dualmode">Download the source bundle (.tar.gz)</a></li>
+  <li><a href="https://github.com/tek126/MeshCore-dualmode/tree/main/examples/dualmode">Browse the source</a>:
+    <ul>
+      <li><a href="https://github.com/tek126/MeshCore-dualmode/blob/main/examples/dualmode/main.cpp">dualmode/main.cpp</a> — the boot launcher + 5&times;-press switch</li>
+      <li><a href="https://github.com/tek126/MeshCore-dualmode/blob/main/examples/simple_repeater/dualmode_rename.h">dualmode_rename.h</a> — the class-rename shim</li>
+      <li><a href="https://github.com/tek126/MeshCore-dualmode/blob/main/examples/dualmode/README.md">DUALMODE.md</a> — the PlatformIO env + how the two apps co-compile</li>
+    </ul>
+  </li>
+</ul>
+</section>
+
+<footer>
+  <p><b>Built with generative AI.</b> The dual-mode launcher, the beacon add-on, this
+  website, and the supporting code were developed with the assistance of generative
+  AI (Anthropic's Claude), then reviewed and compiled by a human. Read the source,
+  verify behavior, and test before relying on it.</p>
+  <p>Community build, not affiliated with the MeshCore or Meshtastic projects.
+  Firmware is provided as-is; flashing is at your own risk and is reversible.</p>
+</footer>
+
+</div>
+</body>
+</html>

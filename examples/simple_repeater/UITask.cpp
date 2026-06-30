@@ -1,6 +1,10 @@
+#include "dualmode_rename.h"   // must precede UITask.h (renames classes under -D DUALMODE)
 #include "UITask.h"
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
+#ifdef WITH_MT_BEACON
+#include "MtBeaconControl.h"   // -I examples/meshtastic_beacon
+#endif
 
 #ifndef USER_BTN_PRESSED
 #define USER_BTN_PRESSED LOW
@@ -68,7 +72,11 @@ void UITask::renderCurrScreen() {
     _display->print(_version_info);
 
     // node type
+#ifdef WITH_MT_BEACON
+    const char* node_type = "< Repeater +Beacon >";
+#else
     const char* node_type = "< Repeater >";
+#endif
     uint16_t typeWidth = _display->getTextWidth(node_type);
     _display->setCursor((_display->width() - typeWidth) / 2, 48);
     _display->print(node_type);
@@ -89,6 +97,17 @@ void UITask::renderCurrScreen() {
     _display->setCursor(0, 30);
     sprintf(tmp, "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
     _display->print(tmp);
+
+#ifdef WITH_MT_BEACON
+    // live Meshtastic beacon status (green = on, red = off)
+    if (_beacon) {
+      char b[40];
+      _beacon->uiLine(b, sizeof(b));
+      _display->setCursor(0, 40);
+      _display->setColor(_beacon->enabled() ? DisplayDriver::GREEN : DisplayDriver::RED);
+      _display->print(b);
+    }
+#endif
   }
 }
 
