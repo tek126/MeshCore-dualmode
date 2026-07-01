@@ -61,6 +61,7 @@ public:
     int8_t   tx_power;
     uint16_t park_secs;      // stationary time before a unified location update fires
     uint16_t stop_radius_m;  // movement within this radius counts as "stopped"
+    uint16_t advert_delay_s; // gap between the Meshtastic burst and the MeshCore advert
     float    freq_override;  // 0 = auto (derived from region + preset)
     char     text[64];
     // derived from region/preset (recomputed on every change; persisted too)
@@ -86,7 +87,7 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC = 0x324E5241UL;  // 'ARN2' — car-node config v2 (park model)
+  static const uint32_t MAGIC = 0x334E5241UL;  // 'ARN3' — car-node config v3 (+advert_delay)
 
   Config cfg;
   uint32_t node_num = 0;
@@ -143,6 +144,7 @@ private:
     cfg.tx_power = 22;         // vehicle-powered: favour visibility (region-capped)
     cfg.park_secs = 300;       // stopped for 5 min -> push a location update
     cfg.stop_radius_m = 30;    // GPS jitter / small repositioning still counts as parked
+    cfg.advert_delay_s = 10;   // MeshCore advert fires 10 s after the Meshtastic burst
     strncpy(cfg.text, "MeshCore mobile node", sizeof(cfg.text) - 1);
     recompute();
   }
@@ -166,6 +168,7 @@ private:
     cfg.tx_power = constrain(cfg.tx_power, -9, 22);
     cfg.park_secs = constrain(cfg.park_secs, 30, 86400);
     cfg.stop_radius_m = constrain(cfg.stop_radius_m, 5, 2000);
+    cfg.advert_delay_s = constrain(cfg.advert_delay_s, 0, 600);
     cfg.enabled = cfg.enabled ? 1 : 0;
     cfg.text[sizeof(cfg.text) - 1] = 0;
     recompute();   // re-derive in case the preset/region tables changed
@@ -196,6 +199,7 @@ private:
     Serial.println(F("  status             show drive state + park config"));
     Serial.println(F("  park <sec>         stopped time before an update fires, 30-86400"));
     Serial.println(F("  radius <m>         movement within this counts as stopped, 5-2000"));
+    Serial.println(F("  advertdelay <sec>  gap: Meshtastic burst -> MeshCore advert, 0-600"));
     Serial.println(F("A location update fires ONCE when the vehicle parks (stopped >park sec),"));
     Serial.println(F("pushing the Meshtastic beacon AND a MeshCore re-advert together. Nothing"));
     Serial.println(F("is sent while driving; re-parking the same spot won't re-broadcast."));
@@ -361,6 +365,10 @@ public:
     return true;
   }
 
+  // How long the repeater should delay the MeshCore advert after the Meshtastic
+  // burst (ms), so the two park transmissions don't land on top of each other.
+  uint32_t advertDelayMs() const { return (uint32_t)cfg.advert_delay_s * 1000UL; }
+
   // Compact one-line status for the repeater's home screen.
   void uiLine(char* out, size_t n) const {
     if (!cfg.enabled) { snprintf(out, n, "CarNode off"); return; }
@@ -393,9 +401,9 @@ public:
   void carStatus(char* reply) {
     const char* st = drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "nofix";
     snprintf(reply, 160,
-             "carnode %s [%s] park%ds r%dm loc:%s !%08lx",
+             "carnode %s [%s] park%ds r%dm adv%ds loc:%s !%08lx",
              cfg.enabled ? "ON" : "off", st,
-             (int)cfg.park_secs, (int)cfg.stop_radius_m,
+             (int)cfg.park_secs, (int)cfg.stop_radius_m, (int)cfg.advert_delay_s,
              have_advert ? "set" : "none", (unsigned long)node_num);
   }
 
@@ -507,7 +515,7 @@ public:
       carStatus(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printCarHelp();
-      strcpy(reply, "carnode: status | park <sec> | radius <m>  (beacon RF is under 'mtbeacon')");
+      strcpy(reply, "carnode: status | park <sec> | radius <m> | advertdelay <sec>  (beacon RF is under 'mtbeacon')");
     } else if (memcmp(a, "park ", 5) == 0) {
       int s = atoi(a + 5);
       if (s < 30 || s > 86400) { strcpy(reply, "Error: park 30-86400 sec"); }
@@ -516,6 +524,10 @@ public:
       int m = atoi(a + 7);
       if (m < 5 || m > 2000) { strcpy(reply, "Error: radius 5-2000 m"); }
       else { cfg.stop_radius_m = m; save(fs); sprintf(reply, "OK - stopped = within %d m", m); }
+    } else if (memcmp(a, "advertdelay ", 12) == 0) {
+      int s = atoi(a + 12);
+      if (s < 0 || s > 600) { strcpy(reply, "Error: advertdelay 0-600 sec"); }
+      else { cfg.advert_delay_s = s; save(fs); sprintf(reply, "OK - MeshCore advert %d s after Meshtastic burst", s); }
     } else {
       strcpy(reply, "Unknown - try 'carnode help'");
     }

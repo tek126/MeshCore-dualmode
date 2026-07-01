@@ -1391,9 +1391,9 @@ void MyMesh::loop() {
       _prefs.node_lat = rlat;
       _prefs.node_lon = rlon;
       savePrefs();
-      // Space the MeshCore advert ~10 s after the Meshtastic burst so the two
-      // don't land on top of each other (the burst itself blocks ~2 s first).
-      sendSelfAdvertisement(10000, true);  // flood re-advert with the parked location
+      // Space the MeshCore advert after the Meshtastic burst so the two don't
+      // land on top of each other (delay is the `carnode advertdelay` knob).
+      sendSelfAdvertisement((int)_carnode.advertDelayMs(), true);  // flood re-advert with parked location
       updateFloodAdvertTimer();            // push the next periodic flood advert out
     }
   }

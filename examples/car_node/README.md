@@ -106,6 +106,7 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 | `carnode` / `carnode status` | show drive state (nofix/driving/parked) + park config |
 | `carnode park <sec>` | stopped time before an update fires (30–86400, default 300) |
 | `carnode radius <m>` | movement within this counts as "stopped" (5–2000, default 30) |
+| `carnode advertdelay <sec>` | gap from the Meshtastic burst to the MeshCore advert (0–600, default 10) |
 
 **Park model.** The node watches its GPS fix. While the position keeps moving
 outside `radius` metres, it's *driving* and stays silent. Once the fix sits
