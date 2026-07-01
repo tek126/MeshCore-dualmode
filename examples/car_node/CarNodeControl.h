@@ -272,13 +272,17 @@ private:
     }
 
     // A park is infrequent and the whole point is the location, so ALWAYS send
-    // both Position(1) and NodeInfo(0) — Position first so the map pin goes out
-    // earliest. (The mtbeacon rotate/alternate trick, which sent only one per
-    // burst to save airtime, meant a park could update the node but not its
-    // location; wrong for a car node.) Text(2) is appended only when due.
-    uint8_t kinds[3]; int nk = 0;
-    kinds[nk++] = 1;   // Position — the important one
+    // both Position(1) and NodeInfo(0). Position is sent TWICE (once first, once
+    // last) for redundancy against a missed broadcast on the busy public LongFast
+    // channel — the two copies are separated by the NodeInfo so a single collision
+    // is unlikely to take out both, and each gets its own packet id (not deduped).
+    // (The mtbeacon rotate/alternate trick, which sent only one presence packet
+    // per burst to save airtime, could update the node but not its location on a
+    // park — wrong for a car node.) Text(2) is appended only when due.
+    uint8_t kinds[4]; int nk = 0;
+    kinds[nk++] = 1;   // Position — the important one, sent first
     kinds[nk++] = 0;   // NodeInfo — names the node
+    kinds[nk++] = 1;   // Position again — redundancy
     if (pending_text) kinds[nk++] = 2;
 
     uint8_t pkt[256];
@@ -545,8 +549,8 @@ public:
           if (!park_reported) park_event = true;
         }
       }
-    } else if (cfg.enabled && drive_state == 0) {
-      // stay "no fix" until the first valid reading
+    } else if (cfg.enabled) {
+      drive_state = 0;   // no current GPS fix -> report "nofix" live (not latched)
     }
 
     bool manual = pending_send;
