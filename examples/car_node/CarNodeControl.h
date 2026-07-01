@@ -197,6 +197,7 @@ private:
   void printCarHelp() {
     Serial.println(F("carnode commands (mobile/park behaviour):"));
     Serial.println(F("  status             show drive state + park config"));
+    Serial.println(F("  on | off | send    enable/disable/push now (also under 'mtbeacon')"));
     Serial.println(F("  park <sec>         stopped time before an update fires, 30-86400"));
     Serial.println(F("  radius <m>         movement within this counts as stopped, 5-2000"));
     Serial.println(F("  advertdelay <sec>  gap: Meshtastic burst -> MeshCore advert, 0-600"));
@@ -515,7 +516,13 @@ public:
       carStatus(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printCarHelp();
-      strcpy(reply, "carnode: status | park <sec> | radius <m> | advertdelay <sec>  (beacon RF is under 'mtbeacon')");
+      strcpy(reply, "carnode: status on off send | park <sec> | radius <m> | advertdelay <sec>  (beacon RF is under 'mtbeacon')");
+    } else if (strcmp(a, "on") == 0) {          // alias of 'mtbeacon on'
+      cfg.enabled = 1; save(fs); strcpy(reply, "OK - carnode on");
+    } else if (strcmp(a, "off") == 0) {         // alias of 'mtbeacon off'
+      cfg.enabled = 0; save(fs); strcpy(reply, "OK - carnode off");
+    } else if (strcmp(a, "send") == 0) {        // alias of 'mtbeacon send'
+      pending_send = true; pending_text = true; strcpy(reply, "OK - pushing location update shortly");
     } else if (memcmp(a, "park ", 5) == 0) {
       int s = atoi(a + 5);
       if (s < 30 || s > 86400) { strcpy(reply, "Error: park 30-86400 sec"); }
