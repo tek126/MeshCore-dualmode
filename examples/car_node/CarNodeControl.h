@@ -95,7 +95,6 @@ private:
   unsigned long hold_until = 0;        // earliest next TX (duty cycle / LBT backoff)
   unsigned long last_text_ms = 0;      // when the chat text last went out
   uint16_t flood_hours_seen = 0;       // last-known flood-advert interval (for status)
-  uint8_t  presence_rot = 0;           // alternates NodeInfo/Position when rotating
   bool     pending_text = false;       // include the chat text on the next burst
   bool     pending_send = false;       // a manual "carnode send" is queued
 
@@ -272,12 +271,14 @@ private:
       return false;
     }
 
-    // NodeInfo(0) + Position(1). At slow presets, send one presence packet/cycle
-    // (alternating) to bound the off-channel window. Text(2) only when due.
+    // A park is infrequent and the whole point is the location, so ALWAYS send
+    // both Position(1) and NodeInfo(0) — Position first so the map pin goes out
+    // earliest. (The mtbeacon rotate/alternate trick, which sent only one per
+    // burst to save airtime, meant a park could update the node but not its
+    // location; wrong for a car node.) Text(2) is appended only when due.
     uint8_t kinds[3]; int nk = 0;
-    bool rotate = (driver.getEstAirtimeFor(60) * 2 + 120) > 2500;
-    if (rotate) { kinds[nk++] = presence_rot; presence_rot ^= 1; }
-    else        { kinds[nk++] = 0; kinds[nk++] = 1; }
+    kinds[nk++] = 1;   // Position — the important one
+    kinds[nk++] = 0;   // NodeInfo — names the node
     if (pending_text) kinds[nk++] = 2;
 
     uint8_t pkt[256];
