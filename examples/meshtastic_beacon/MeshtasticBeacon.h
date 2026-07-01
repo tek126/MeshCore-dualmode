@@ -152,19 +152,34 @@ void radioEnterMeshtastic(DriverT& driver, RadioT& radio,
 }
 
 // Send one raw packet while already tuned; cooperates with the TX state machine.
+//
+// Completion is normally signalled by the radio's TxDone interrupt (surfaced by
+// the driver's isSendComplete()). After a Meshtastic retune that interrupt edge
+// can occasionally be missed -- which, with a fixed multi-second timeout, would
+// hang here and freeze the whole main loop while the node appears dead. As a
+// safety net we bound the wait by the packet's estimated airtime plus a margin:
+// once that has elapsed the packet has physically finished leaving the antenna,
+// so it is safe to move on and the packet still goes out. *irq_missed (if given)
+// is set true when we fell back to the airtime bound instead of the interrupt --
+// a direct "the TxDone IRQ isn't firing" diagnostic. Returns false only when the
+// transmit could not even be started.
 template <class DriverT>
 bool radioSendBlocking(DriverT& driver, const uint8_t* pkt, int len,
-                       uint32_t timeout_ms = 5000) {
-  bool ok = driver.startSendRaw(pkt, len);
-  if (ok) {
-    uint32_t start = millis();
-    while (!driver.isSendComplete()) {
-      if ((uint32_t)(millis() - start) > timeout_ms) { ok = false; break; }
-      yield();
-    }
-    driver.onSendFinished();
+                       bool* irq_missed = nullptr) {
+  if (irq_missed) *irq_missed = false;
+  if (!driver.startSendRaw(pkt, len)) return false;
+
+  uint32_t airtime = driver.getEstAirtimeFor(len);   // ms on air for this packet
+  uint32_t cap = airtime * 2 + 500;                  // physical-done bound + margin
+  uint32_t start = millis();
+  bool by_irq = false;
+  while ((uint32_t)(millis() - start) <= cap) {
+    if (driver.isSendComplete()) { by_irq = true; break; }
+    yield();
   }
-  return ok;
+  driver.onSendFinished();
+  if (!by_irq && irq_missed) *irq_missed = true;
+  return true;   // sent: IRQ-confirmed, or airtime elapsed so physically done
 }
 
 template <class DriverT, class RadioT>
@@ -184,10 +199,9 @@ bool transmitOnce(DriverT& driver, RadioT& radio,
                   const uint8_t* pkt, int len,
                   float home_freq, float home_bw, uint8_t home_sf, uint8_t home_cr,
                   uint8_t home_sync,
-                  int8_t mt_tx_power, int8_t home_tx_power,
-                  uint32_t timeout_ms = 5000) {
+                  int8_t mt_tx_power, int8_t home_tx_power) {
   radioEnterMeshtastic(driver, radio, mt, mt_tx_power);
-  bool ok = radioSendBlocking(driver, pkt, len, timeout_ms);
+  bool ok = radioSendBlocking(driver, pkt, len);
   radioRestoreMeshCore(driver, radio, home_freq, home_bw, home_sf, home_cr,
                        home_sync, home_tx_power);
   return ok;

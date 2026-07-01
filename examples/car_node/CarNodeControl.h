@@ -293,15 +293,23 @@ private:
     uint8_t pkt[256];
     uint32_t air = 0;
     bool first = true;
+    int sent = 0, irq_misses = 0;
     for (int i = 0; i < nk; i++) {
       int len = buildKind(kinds[i], pkt, sizeof(pkt), c);
       if (len <= 0) continue;                          // disabled / unavailable
       if (!first) delay(120);                          // inter-packet gap
-      meshtastic::radioSendBlocking(driver, pkt, len);
+      bool miss = false;
+      if (!meshtastic::radioSendBlocking(driver, pkt, len, &miss)) break;  // radio wouldn't start: abort burst
+      sent++; if (miss) irq_misses++;
       air += driver.getEstAirtimeFor(len);
       first = false;
       if (kinds[i] == 2) { pending_text = false; last_text_ms = millis(); }  // text delivered
     }
+    // Diagnostic: a missed TxDone interrupt means the packet still went out (via
+    // the airtime fallback) but the radio ISR isn't firing after the retune.
+    if (irq_misses)
+      Serial.printf("carnode: TxDone IRQ missed on %d/%d packet(s) - used airtime fallback\n",
+                    irq_misses, sent);
 
     meshtastic::radioRestoreMeshCore(driver, radio, c.home_freq, c.home_bw,
                 c.home_sf, c.home_cr, c.home_sync, c.home_tx_power);
@@ -310,7 +318,7 @@ private:
     uint8_t duty = meshtastic::REGIONS[cfg.region_idx].duty_pct;
     if (duty > 0 && duty < 100)
       hold_until = millis() + (unsigned long)air * (100 - duty) / duty;
-    return true;
+    return sent > 0;   // nothing left the antenna -> let the caller retry
   }
 
 public:
