@@ -1,12 +1,12 @@
-# car_node (personal fork)
+# car_node
 
 A **mobile, in-vehicle** MeshCore repeater that reports **where it parks**. When
 the vehicle stops moving for a few minutes, it pushes its GPS location to *both*
 networks at once — a Meshtastic beacon **and** a fresh MeshCore advert — so the
 node shows up where you actually left it, on both maps.
 
-This is a personal fork of the [`meshtastic_beacon`](../meshtastic_beacon/)
-project, kept deliberately separate from it. It reuses that project's
+This is a fork of the [`meshtastic_beacon`](../meshtastic_beacon/)
+project. It reuses that project's
 on-air-verified interop math (`MeshtasticProto.h` / `MeshtasticBeacon.h`)
 unchanged, and replaces the static, fixed-interval beacon with a park-triggered,
 GPS-driven one.
@@ -20,7 +20,7 @@ GPS-driven one.
 | Networks updated | Meshtastic only | **Meshtastic + MeshCore together** (one fix, one event) |
 | While driving | beacons periodically | silent — nothing is sent |
 | Power posture | frugal (shared spectrum) | favours visibility (still LBT + region cap + EU duty) |
-| CLI verb | `mtbeacon ...` | `carnode ...` |
+| CLI verbs | `mtbeacon ...` | `mtbeacon ...` (beacon RF) + `carnode ...` (park) |
 | Config file | `/mtbeacon` | `/carnode` |
 
 `CarNodeControl.h` is header-only and drops into `simple_repeater` behind
@@ -77,27 +77,35 @@ Detection uses the shared `MomentaryButton user_btn` (handles the active-low
 logic), so it works on any board that declares one. The OLED briefly shows
 "Hibernating..." before the board powers down.
 
-## Runtime control (`carnode` CLI)
+## Runtime control
 
-Over serial or an admin remote-CLI session:
+Over serial or an admin remote-CLI session. The command surface is split into
+two verbs — one underlying beacon engine, no duplicate transmitters:
+
+**`mtbeacon`** — the Meshtastic beacon itself (RF + appearance):
 
 | Command | Effect |
 | --- | --- |
-| `carnode` / `carnode status` | show config + derived node id |
-| `carnode help` | full command list (prints to serial) |
-| `carnode on` / `carnode off` | enable / disable beaconing |
-| `carnode send` | push a location update now (both networks) |
-| `carnode park <sec>` | stationary time before an update fires (30–86400, default 300) |
+| `mtbeacon` / `mtbeacon status` | show beacon RF config + node id |
+| `mtbeacon on` / `mtbeacon off` | enable / disable beaconing |
+| `mtbeacon send` | push a location update now (both networks) |
+| `mtbeacon preset <name>` | modem preset (LongFast, MediumFast, …) |
+| `mtbeacon region <name>` | region/country band (US, EU_868, …) |
+| `mtbeacon freq <MHz\|auto>` | manual frequency override; `auto` re-derives |
+| `mtbeacon power <dBm>` | TX power (−9…22), capped to region limit |
+| `mtbeacon text <string>` | announced chat text (≤63 chars) |
+| `mtbeacon text.mult <N>` | post text N times per flood-advert period (0 = never) |
+| `mtbeacon nodeinfo on/off` | include NodeInfo (named node) — default on |
+| `mtbeacon position on/off` | include Position (live map pin) — default on |
+| `mtbeacon presets` / `mtbeacon regions` | list available values |
+
+**`carnode`** — the car-specific park behaviour:
+
+| Command | Effect |
+| --- | --- |
+| `carnode` / `carnode status` | show drive state (nofix/driving/parked) + park config |
+| `carnode park <sec>` | stopped time before an update fires (30–86400, default 300) |
 | `carnode radius <m>` | movement within this counts as "stopped" (5–2000, default 30) |
-| `carnode preset <name>` | modem preset (LongFast, MediumFast, …) |
-| `carnode region <name>` | region/country band (US, EU_868, …) |
-| `carnode freq <MHz\|auto>` | manual frequency override; `auto` re-derives |
-| `carnode power <dBm>` | TX power (−9…22), capped to region limit |
-| `carnode text <string>` | announced chat text (≤63 chars) |
-| `carnode text.mult <N>` | post text N times per flood-advert period (0 = never) |
-| `carnode nodeinfo on/off` | include NodeInfo (named node) — default on |
-| `carnode position on/off` | include Position (live map pin) — default on |
-| `carnode presets` / `carnode regions` | list available values |
 
 **Park model.** The node watches its GPS fix. While the position keeps moving
 outside `radius` metres, it's *driving* and stays silent. Once the fix sits
@@ -110,7 +118,7 @@ single **unified update** fires:
    learns where you stopped.
 
 Both use the *same* fix at the *same* moment. Re-parking in the same spot won't
-re-broadcast (dedup by `radius`); `carnode send` forces an update immediately.
+re-broadcast (dedup by `radius`); `mtbeacon send` forces an update immediately.
 The MeshCore location is persisted, so it survives a reboot while parked.
 
 > The MeshCore side relies on `advert_loc_policy = prefs` (the repeater default),
@@ -119,7 +127,7 @@ The MeshCore location is persisted, so it survives a reboot while parked.
 > time — not on every periodic advert.
 
 Defaults: US LongFast, 5-min park / 30 m radius, 22 dBm (region-capped), disabled
-until `carnode on`. The OLED home screen shows `CarNode driving` / `parked`.
+until `mtbeacon on`. The OLED home screen shows `CarNode driving` / `parked`.
 
 ## Scope / etiquette
 

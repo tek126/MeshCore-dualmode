@@ -1291,7 +1291,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 #endif
 #ifdef WITH_CAR_NODE
   } else if (_carnode.handleCommand(command, reply, _fs)) {
-    // handled by the mobile car-node beacon ("carnode ..." verbs)
+    // handled by the car node: "mtbeacon ..." (beacon RF) + "carnode ..." (park)
 #endif
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands

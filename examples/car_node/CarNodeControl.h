@@ -173,26 +173,34 @@ private:
   }
 
   // Detailed help to the serial console (the reply buffer is too small for it).
-  void printHelp() {
-    Serial.println(F("carnode commands:"));
-    Serial.println(F("  status             show current config + drive state"));
+  // The command surface is split: `mtbeacon` tunes the Meshtastic beacon itself,
+  // `carnode` tunes the car-specific park behaviour.
+  void printBeaconHelp() {
+    Serial.println(F("mtbeacon commands (the Meshtastic beacon):"));
+    Serial.println(F("  status             show beacon RF config"));
     Serial.println(F("  on | off           enable / disable beaconing"));
     Serial.println(F("  send               push a location update now (both networks)"));
-    Serial.println(F("  park <sec>         stationary time before an update, 30-86400"));
-    Serial.println(F("  radius <m>         movement within this counts as stopped, 5-2000"));
-    Serial.println(F("  text.mult <N>      chat text N times per flood-advert period (0=never)"));
     Serial.println(F("  preset <name>      modem preset (LongFast, MediumFast, ...)"));
     Serial.println(F("  region <name>      region/country band (US, EU_868, ...)"));
     Serial.println(F("  freq <MHz|auto>    manual frequency override; auto = region+preset"));
     Serial.println(F("  power <dBm>        TX power, -9..22 (capped to region limit)"));
     Serial.println(F("  text <string>      the chat-message content (<=63 chars)"));
+    Serial.println(F("  text.mult <N>      chat text N times per flood-advert period (0=never)"));
     Serial.println(F("  nodeinfo on|off    include NodeInfo (named node 'MC <name>')"));
     Serial.println(F("  position on|off    include Position (map pin) from live GPS"));
     Serial.println(F("  presets / regions  list available values"));
-    Serial.println(F("  help               this list"));
-    Serial.println(F("Location updates fire ONCE when the vehicle parks (stopped >park sec),"));
+    Serial.println(F("Car-specific timing lives under 'carnode' (park / radius)."));
+  }
+
+  void printCarHelp() {
+    Serial.println(F("carnode commands (mobile/park behaviour):"));
+    Serial.println(F("  status             show drive state + park config"));
+    Serial.println(F("  park <sec>         stopped time before an update fires, 30-86400"));
+    Serial.println(F("  radius <m>         movement within this counts as stopped, 5-2000"));
+    Serial.println(F("A location update fires ONCE when the vehicle parks (stopped >park sec),"));
     Serial.println(F("pushing the Meshtastic beacon AND a MeshCore re-advert together. Nothing"));
     Serial.println(F("is sent while driving; re-parking the same spot won't re-broadcast."));
+    Serial.println(F("Beacon RF/appearance lives under 'mtbeacon' (preset/region/text/...)."));
   }
 
   // append " <int>.<3frac>" style float for echoes / status
@@ -355,40 +363,66 @@ public:
     snprintf(out, n, "CarNode %s", s);
   }
 
-  void status(char* reply) {
+  // `mtbeacon status` — the Meshtastic beacon's RF config + appearance.
+  void beaconStatus(char* reply) {
     const meshtastic::Preset& p = meshtastic::PRESETS[cfg.preset_idx];
     const meshtastic::Region& r = meshtastic::REGIONS[cfg.region_idx];
     int8_t ep = effectivePower();
     char fbuf[14] = {0};
     appendFreq(fbuf, cfg.freq);
-    const char* st = drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "nofix";
     char txt[22];
     if (cfg.text_mult == 0) strcpy(txt, "txt:off");
     else if (flood_hours_seen == 0) snprintf(txt, sizeof(txt), "txt%dx(noadv)", (int)cfg.text_mult);
     else snprintf(txt, sizeof(txt), "txt%dx~%dh", (int)cfg.text_mult,
                   (int)(flood_hours_seen / cfg.text_mult));
-    // "park<N>s" = stationary time to trigger; "r<N>m" = stop radius; st = drive state
     snprintf(reply, 160,
-             "carnode %s %sMHz%s %s %s(SF%d BW%d) park%ds r%dm [%s] %ddBm%s %s%s %s !%08lx",
+             "mtbeacon %s %sMHz%s %s %s(SF%d BW%d) %ddBm%s %s%s %s !%08lx",
              cfg.enabled ? "ON" : "off", fbuf, cfg.freq_override > 0.0f ? "*" : "",
              r.name, p.name, (int)cfg.sf, (int)cfg.bw,
-             (int)cfg.park_secs, (int)cfg.stop_radius_m, st,
              (int)ep, ep < cfg.tx_power ? "(cap)" : "",
              cfg.send_nodeinfo ? "+info" : "", cfg.send_position ? "+pos" : "",
              txt, (unsigned long)node_num);
   }
 
-  // Returns false if `command` is not a "carnode" verb (caller falls through).
-  bool handleCommand(char* command, char* reply, FILESYSTEM* fs) {
-    if (memcmp(command, "carnode", 7) != 0) return false;
-    const char* a = command + 7;
-    while (*a == ' ') a++;
+  // `carnode status` — the car-specific park behaviour + drive state.
+  void carStatus(char* reply) {
+    const char* st = drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "nofix";
+    snprintf(reply, 160,
+             "carnode %s [%s] park%ds r%dm loc:%s !%08lx",
+             cfg.enabled ? "ON" : "off", st,
+             (int)cfg.park_secs, (int)cfg.stop_radius_m,
+             have_advert ? "set" : "none", (unsigned long)node_num);
+  }
 
+  // If `command` is `<verb>` (optionally followed by args), return a pointer to
+  // the args with leading spaces skipped; else nullptr. Requires a word boundary
+  // so e.g. "carnodex" does not match "carnode".
+  static const char* matchVerb(const char* command, const char* verb) {
+    size_t n = strlen(verb);
+    if (strncmp(command, verb, n) != 0) return nullptr;
+    if (command[n] != 0 && command[n] != ' ') return nullptr;
+    const char* a = command + n;
+    while (*a == ' ') a++;
+    return a;
+  }
+
+  // Verb dispatch. This build routes BOTH `mtbeacon` (beacon RF/appearance) and
+  // `carnode` (mobile/park behaviour) here; returns false for anything else so
+  // the caller falls through to the common CLI.
+  bool handleCommand(char* command, char* reply, FILESYSTEM* fs) {
+    const char* a;
+    if ((a = matchVerb(command, "mtbeacon")) != nullptr) return handleBeacon(a, reply, fs);
+    if ((a = matchVerb(command, "carnode"))  != nullptr) return handleCar(a, reply, fs);
+    return false;
+  }
+
+  // `mtbeacon ...` — configure the Meshtastic beacon itself.
+  bool handleBeacon(const char* a, char* reply, FILESYSTEM* fs) {
     if (*a == 0 || strcmp(a, "status") == 0) {
-      status(reply);
+      beaconStatus(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
-      printHelp();
-      strcpy(reply, "cmds: status on off send | park radius text.mult text freq power preset region nodeinfo position | presets regions help");
+      printBeaconHelp();
+      strcpy(reply, "mtbeacon: status on off send | preset region freq power text text.mult nodeinfo position | presets regions");
     } else if (memcmp(a, "nodeinfo ", 9) == 0) {
       cfg.send_nodeinfo = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - nodeinfo %s", cfg.send_nodeinfo ? "on" : "off");
@@ -396,9 +430,9 @@ public:
       cfg.send_position = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - position %s", cfg.send_position ? "on" : "off");
     } else if (strcmp(a, "on") == 0) {
-      cfg.enabled = 1; save(fs); strcpy(reply, "OK - carnode on");
+      cfg.enabled = 1; save(fs); strcpy(reply, "OK - beacon on");
     } else if (strcmp(a, "off") == 0) {
-      cfg.enabled = 0; save(fs); strcpy(reply, "OK - carnode off");
+      cfg.enabled = 0; save(fs); strcpy(reply, "OK - beacon off");
     } else if (strcmp(a, "send") == 0) {
       pending_send = true; pending_text = true;
       strcpy(reply, "OK - pushing location update shortly");
@@ -412,17 +446,9 @@ public:
       for (uint8_t i = 0; i < meshtastic::NUM_REGIONS; i++) {
         strcat(reply, " "); strcat(reply, meshtastic::REGIONS[i].name);
       }
-    } else if (memcmp(a, "park ", 5) == 0) {
-      int s = atoi(a + 5);
-      if (s < 30 || s > 86400) { strcpy(reply, "Error: park 30-86400 sec"); }
-      else { cfg.park_secs = s; save(fs); sprintf(reply, "OK - update after %d sec stopped", s); }
-    } else if (memcmp(a, "radius ", 7) == 0) {
-      int m = atoi(a + 7);
-      if (m < 5 || m > 2000) { strcpy(reply, "Error: radius 5-2000 m"); }
-      else { cfg.stop_radius_m = m; save(fs); sprintf(reply, "OK - stopped = within %d m", m); }
     } else if (memcmp(a, "preset ", 7) == 0) {
       int idx = meshtastic::findPreset(a + 7);
-      if (idx < 0) { strcpy(reply, "Error: unknown preset (try 'carnode presets')"); }
+      if (idx < 0) { strcpy(reply, "Error: unknown preset (try 'mtbeacon presets')"); }
       else {
         cfg.preset_idx = idx; cfg.freq_override = 0.0f; recompute(); save(fs);
         const meshtastic::Preset& p = meshtastic::PRESETS[idx];
@@ -432,7 +458,7 @@ public:
     } else if (memcmp(a, "region ", 7) == 0 || memcmp(a, "country ", 8) == 0) {
       const char* arg = (a[0] == 'r') ? a + 7 : a + 8;
       int idx = meshtastic::findRegion(arg);
-      if (idx < 0) { strcpy(reply, "Error: unknown region (try 'carnode regions')"); }
+      if (idx < 0) { strcpy(reply, "Error: unknown region (try 'mtbeacon regions')"); }
       else {
         cfg.region_idx = idx; cfg.freq_override = 0.0f; recompute(); save(fs);
         strcpy(reply, "OK - "); strcat(reply, meshtastic::REGIONS[idx].name);
@@ -464,6 +490,27 @@ public:
       cfg.text[sizeof(cfg.text) - 1] = 0;
       save(fs);
       sprintf(reply, "OK - \"%.40s\"", cfg.text);
+    } else {
+      strcpy(reply, "Unknown - try 'mtbeacon help'");
+    }
+    return true;
+  }
+
+  // `carnode ...` — configure the car-specific park behaviour.
+  bool handleCar(const char* a, char* reply, FILESYSTEM* fs) {
+    if (*a == 0 || strcmp(a, "status") == 0) {
+      carStatus(reply);
+    } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
+      printCarHelp();
+      strcpy(reply, "carnode: status | park <sec> | radius <m>  (beacon RF is under 'mtbeacon')");
+    } else if (memcmp(a, "park ", 5) == 0) {
+      int s = atoi(a + 5);
+      if (s < 30 || s > 86400) { strcpy(reply, "Error: park 30-86400 sec"); }
+      else { cfg.park_secs = s; save(fs); sprintf(reply, "OK - update after %d sec stopped", s); }
+    } else if (memcmp(a, "radius ", 7) == 0) {
+      int m = atoi(a + 7);
+      if (m < 5 || m > 2000) { strcpy(reply, "Error: radius 5-2000 m"); }
+      else { cfg.stop_radius_m = m; save(fs); sprintf(reply, "OK - stopped = within %d m", m); }
     } else {
       strcpy(reply, "Unknown - try 'carnode help'");
     }
