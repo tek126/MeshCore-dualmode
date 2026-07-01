@@ -166,10 +166,11 @@ void loop() {
 
 #ifdef WITH_CAR_NODE
   // Hold the user button for CAR_NODE_HOLD_OFF_MILLIS (~3 s) to hibernate the
-  // car node. The board enters its lowest-power state and does not return:
-  //   T114 -> sd_power_system_off(), wakes on the button / reset.
-  //   V4   -> button-only deep sleep (hibernateButtonWake): stays asleep through
-  //           LoRa traffic; tap the user button to wake (do not hold it).
+  // car node via board.hibernateButtonWake(): the board enters its lowest-power
+  // state, waking only on the user button, and does not return.
+  //   V4   -> ESP32 deep sleep (button-only wake, stays asleep through LoRa RX).
+  //   T114 -> nRF52 SYSTEMOFF with a button SENSE wake (SD-aware); wake reboots.
+  // On both, tap the button to wake (on V4 don't hold GPIO0 through reset).
   #ifndef CAR_NODE_HOLD_OFF_MILLIS
     #define CAR_NODE_HOLD_OFF_MILLIS 3000
   #endif
@@ -188,11 +189,7 @@ void loop() {
           display.endFrame();
         }
       #endif
-      #if defined(HELTEC_LORA_V4)
-        board.hibernateButtonWake(PIN_USER_BTN);   // wake on button only (not LoRa RX)
-      #else
-        board.powerOff();   // does not return
-      #endif
+        board.hibernateButtonWake(PIN_USER_BTN);   // wake on button only; does not return
       }
     } else {
       carnode_btn_down_at = 0;

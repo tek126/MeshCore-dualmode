@@ -56,4 +56,38 @@ public:
 #endif
     sd_power_system_off();
   }
+
+  // Hibernate waking on the user button. Waits for the button to be released
+  // (so DETECT isn't already latched), arms a GPIO SENSE wake on it, then enters
+  // SYSTEMOFF. SD-aware: sd_power_system_off() just RETURNS without powering off
+  // when the SoftDevice isn't enabled (e.g. a non-BLE repeater build), so fall
+  // back to the POWER register directly, then reset if even that returns. Waking
+  // from SYSTEMOFF is a reset, so the node reboots. Does not return.
+  void hibernateButtonWake(int pin_btn) {
+#ifdef LED_PIN
+    digitalWrite(LED_PIN, HIGH);
+#endif
+#if ENV_INCLUDE_GPS == 1
+    pinMode(GPS_EN, OUTPUT);
+    digitalWrite(GPS_EN, LOW);
+#endif
+    // wait (<=10 s) for the user to let go, else the sense wake trips instantly
+    pinMode(pin_btn, INPUT_PULLUP);
+    unsigned long t0 = millis();
+    while (digitalRead(pin_btn) == LOW && (unsigned long)(millis() - t0) < 10000) delay(10);
+
+    nrf_gpio_cfg_sense_input(g_ADigitalPinMap[pin_btn],
+                             NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+
+    Serial.flush();
+    uint8_t sd_enabled = 0;
+    sd_softdevice_is_enabled(&sd_enabled);
+    if (sd_enabled) {
+      if (sd_power_system_off() == NRF_ERROR_SOFTDEVICE_NOT_ENABLED) sd_enabled = 0;
+    }
+    if (!sd_enabled) {
+      NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter;   // SoftDevice off: direct register
+    }
+    NVIC_SystemReset();   // never reached in normal operation
+  }
 };
