@@ -16,9 +16,9 @@ GPS-driven one.
 | | mtbeacon | car_node |
 | --- | --- | --- |
 | Position source | repeater's configured lat/lon (static) | **live GPS fix** at park time |
-| Trigger | fixed interval (minutes) | **vehicle parks** (stopped > `park` sec) |
+| Trigger | fixed interval (minutes) | **vehicle parks** (stopped > `park` sec) + light presence every `interval` min |
 | Networks updated | Meshtastic only | **Meshtastic + MeshCore together** (one fix, one event) |
-| While driving | beacons periodically | silent — nothing is sent |
+| While driving | beacons periodically | presence only (NodeInfo, no position) at `interval` |
 | Power posture | frugal (shared spectrum) | favours visibility (still LBT + region cap + EU duty) |
 | CLI verbs | `mtbeacon ...` | `mtbeacon ...` (beacon RF) + `carnode ...` (park) |
 | Config file | `/mtbeacon` | `/carnode` |
@@ -89,6 +89,7 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 | `mtbeacon` / `mtbeacon status` | show beacon RF config + node id |
 | `mtbeacon on` / `mtbeacon off` | enable / disable beaconing |
 | `mtbeacon send` | push a location update now (both networks) |
+| `mtbeacon interval <min>` | periodic presence between parks (0–1440, 0 = park-only, default 30) |
 | `mtbeacon preset <name>` | modem preset (LongFast, MediumFast, …) |
 | `mtbeacon region <name>` | region/country band (US, EU_868, …) |
 | `mtbeacon freq <MHz\|auto>` | manual frequency override; `auto` re-derives |
@@ -110,7 +111,7 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 | `carnode sleep <hours>` | parked this long → stop repeating until driving again (0–720, 0 = never, default 20) |
 
 **Park model.** The node watches its GPS fix. While the position keeps moving
-outside `radius` metres, it's *driving* and stays silent. Once the fix sits
+outside `radius` metres, it's *driving* and sends no location. Once the fix sits
 within `radius` for `park` seconds (default 5 min), the vehicle is *parked* and a
 single **unified update** fires:
 
@@ -122,6 +123,14 @@ single **unified update** fires:
 Both use the *same* fix at the *same* moment. Re-parking in the same spot won't
 re-broadcast (dedup by `radius`); `mtbeacon send` forces an update immediately.
 The MeshCore location is persisted, so it survives a reboot while parked.
+
+**Periodic presence.** Between park events, a light presence beacon (base-mtbeacon
+style) fires every `interval` minutes (default 30, `0` = park-only) so the node
+doesn't age out of Meshtastic node lists. While **parked** it includes Position —
+refreshing the pin at the parked spot; while **driving** (or without a fix) it
+sends NodeInfo only, so the map pin never wanders off to a random mid-drive point.
+Location still updates *only* at park time. The chat text also rides these
+presence cycles when due.
 
 > The MeshCore side relies on `advert_loc_policy = prefs` (the repeater default),
 > which this build keeps. The car node writes the fix into prefs itself rather
@@ -137,9 +146,9 @@ disabled. It wakes the moment driving is detected (the parked fix moves outside
 it; only movement does. The sleep state is runtime-only: a reboot starts awake,
 and `carnode sleep 0` disables the feature.
 
-Defaults: US LongFast, 5-min park / 30 m radius, 22 dBm (region-capped), 20 h
-repeat sleep, disabled until `mtbeacon on`. The OLED home screen shows
-`CarNode driving` / `parked` / `sleeping`.
+Defaults: US LongFast, 5-min park / 30 m radius, 30-min presence, 22 dBm
+(region-capped), 20 h repeat sleep, disabled until `mtbeacon on`. The OLED home
+screen shows `CarNode driving` / `parked` / `sleeping`.
 
 ## Scope / etiquette
 

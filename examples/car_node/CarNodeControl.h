@@ -14,8 +14,14 @@
 //       - a Meshtastic beacon burst (NodeInfo + Position [+ text]), AND
 //       - a request for the repeater to update its MeshCore advert location and
 //         flood re-advert  -- both with the same fix, at the same time.
-//   * While driving, nothing is sent. Re-parking in the same spot does not
-//     re-broadcast (dedup by `stop_radius_m`); `carnode send` forces an update.
+//   * Between park events, a LIGHT periodic presence (base-mtbeacon style) keeps
+//     the node from aging out of Meshtastic node lists: every `interval_mins` it
+//     sends one packet — Position while parked (refreshes the pin at the parked
+//     spot), NodeInfo only while driving or without a fix, so the map pin never
+//     wanders off to some random point mid-drive. 0 = park-only (old behaviour).
+//   * Location, then, still updates ONLY at park time. Re-parking in the same
+//     spot does not re-broadcast (dedup by `stop_radius_m`); `carnode send`
+//     forces an update.
 //
 // The repeater drives the MeshCore side: after tick(), it calls takeReadvert()
 // and, if a location update is pending, writes it into NodePrefs and re-adverts.
@@ -63,6 +69,7 @@ public:
     uint16_t stop_radius_m;  // movement within this radius counts as "stopped"
     uint16_t advert_delay_s; // gap between the Meshtastic burst and the MeshCore advert
     uint16_t sleep_hours;    // parked this long -> stop repeating until driving (0=never)
+    uint16_t interval_mins;  // periodic presence cadence between parks (0=park-only)
     float    freq_override;  // 0 = auto (derived from region + preset)
     char     text[64];
     // derived from region/preset (recomputed on every change; persisted too)
@@ -88,7 +95,7 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC = 0x344E5241UL;  // 'ARN4' — car-node config v4 (+sleep_hours)
+  static const uint32_t MAGIC = 0x354E5241UL;  // 'ARN5' — car-node config v5 (+interval_mins)
 
   Config cfg;
   uint32_t node_num = 0;
@@ -100,6 +107,8 @@ private:
   bool     pending_text = false;       // include the chat text on the next burst
   bool     pending_send = false;       // a manual "carnode send" is queued
   bool     sleep_announced = false;    // last repeat-sleep state we logged to serial
+  unsigned long next_presence = 0;     // when the next periodic presence is due (0=unscheduled)
+  uint8_t  presence_rot = 0;           // alternates NodeInfo/Position when rotating
 
   // --- park detection state ---
   double   anchor_lat = 0, anchor_lon = 0;  // reference point we measure movement from
@@ -148,6 +157,7 @@ private:
     cfg.stop_radius_m = 30;    // GPS jitter / small repositioning still counts as parked
     cfg.advert_delay_s = 10;   // MeshCore advert fires 10 s after the Meshtastic burst
     cfg.sleep_hours = 20;      // parked ~a day -> nobody's around; stop repeating
+    cfg.interval_mins = 30;    // presence cadence between parks (like base mtbeacon)
     strncpy(cfg.text, "MeshCore mobile node", sizeof(cfg.text) - 1);
     recompute();
   }
@@ -173,6 +183,7 @@ private:
     cfg.stop_radius_m = constrain(cfg.stop_radius_m, 5, 2000);
     cfg.advert_delay_s = constrain(cfg.advert_delay_s, 0, 600);
     cfg.sleep_hours = constrain(cfg.sleep_hours, 0, 720);
+    cfg.interval_mins = constrain(cfg.interval_mins, 0, 1440);
     cfg.enabled = cfg.enabled ? 1 : 0;
     cfg.text[sizeof(cfg.text) - 1] = 0;
     recompute();   // re-derive in case the preset/region tables changed
@@ -186,6 +197,7 @@ private:
     Serial.println(F("  status             show beacon RF config"));
     Serial.println(F("  on | off           enable / disable beaconing"));
     Serial.println(F("  send               push a location update now (both networks)"));
+    Serial.println(F("  interval <min>     periodic presence between parks, 0-1440 (0=park-only)"));
     Serial.println(F("  preset <name>      modem preset (LongFast, MediumFast, ...)"));
     Serial.println(F("  region <name>      region/country band (US, EU_868, ...)"));
     Serial.println(F("  freq <MHz|auto>    manual frequency override; auto = region+preset"));
@@ -267,11 +279,19 @@ private:
                 cfg.text, key, klen, chan_hash);
   }
 
-  // One retune: emit the Meshtastic presence (NodeInfo + Position) plus the chat
-  // text if it's due, then restore the MeshCore PHY. Returns false if skipped
-  // (channel busy).
+  // Schedule the next periodic presence, with up to 20 s of random jitter so we
+  // don't lock-step onto the same airtime as other beacons. 0 = feature off.
+  void scheduleNextPresence() {
+    next_presence = (cfg.interval_mins == 0) ? 0
+      : millis() + (unsigned long)cfg.interval_mins * 60000UL
+                 + (unsigned long)random(0, 20001);
+  }
+
+  // One retune: transmit the given packet kinds back-to-back (LBT + duty-cycle
+  // accounting), then restore the MeshCore PHY. Returns false if the channel was
+  // busy or nothing left the antenna — the caller should retry.
   template <class D, class R>
-  bool sendBurst(D& driver, R& radio, const Context& c) {
+  bool sendKinds(D& driver, R& radio, const Context& c, const uint8_t* kinds, int nk) {
     meshtastic::ModemPreset mt = { cfg.freq, cfg.bw, cfg.sf, cfg.cr, cfg.preamble, cfg.sync_word };
     meshtastic::radioEnterMeshtastic(driver, radio, mt, effectivePower());
 
@@ -280,20 +300,6 @@ private:
                   c.home_sf, c.home_cr, c.home_sync, c.home_tx_power);
       return false;
     }
-
-    // A park is infrequent and the whole point is the location, so ALWAYS send
-    // both Position(1) and NodeInfo(0). Position is sent TWICE (once first, once
-    // last) for redundancy against a missed broadcast on the busy public LongFast
-    // channel — the two copies are separated by the NodeInfo so a single collision
-    // is unlikely to take out both, and each gets its own packet id (not deduped).
-    // (The mtbeacon rotate/alternate trick, which sent only one presence packet
-    // per burst to save airtime, could update the node but not its location on a
-    // park — wrong for a car node.) Text(2) is appended only when due.
-    uint8_t kinds[4]; int nk = 0;
-    kinds[nk++] = 1;   // Position — the important one, sent first
-    kinds[nk++] = 0;   // NodeInfo — names the node
-    kinds[nk++] = 1;   // Position again — redundancy
-    if (pending_text) kinds[nk++] = 2;
 
     uint8_t pkt[256];
     uint32_t air = 0;
@@ -324,6 +330,45 @@ private:
     if (duty > 0 && duty < 100)
       hold_until = millis() + (unsigned long)air * (100 - duty) / duty;
     return sent > 0;   // nothing left the antenna -> let the caller retry
+  }
+
+  // Park/manual burst — the full location update.
+  // A park is infrequent and the whole point is the location, so ALWAYS send
+  // both Position(1) and NodeInfo(0). Position is sent TWICE (once first, once
+  // last) for redundancy against a missed broadcast on the busy public LongFast
+  // channel — the two copies are separated by the NodeInfo so a single collision
+  // is unlikely to take out both, and each gets its own packet id (not deduped).
+  // (The mtbeacon rotate/alternate trick, which sent only one presence packet
+  // per burst to save airtime, could update the node but not its location on a
+  // park — wrong for a car node.) Text(2) is appended only when due.
+  template <class D, class R>
+  bool sendBurst(D& driver, R& radio, const Context& c) {
+    uint8_t kinds[4]; int nk = 0;
+    kinds[nk++] = 1;   // Position — the important one, sent first
+    kinds[nk++] = 0;   // NodeInfo — names the node
+    kinds[nk++] = 1;   // Position again — redundancy
+    if (pending_text) kinds[nk++] = 2;
+    return sendKinds(driver, radio, c, kinds, nk);
+  }
+
+  // Periodic light presence (base-mtbeacon style) — keeps the node from aging
+  // out of Meshtastic node lists between park events. Position is included only
+  // while PARKED (it refreshes the pin at the parked spot); while driving or
+  // without a fix it's NodeInfo only, so the map pin never wanders off to some
+  // random mid-drive point and sticks there. At slow presets one packet per
+  // cycle (alternating) bounds the off-channel window, like the base beacon.
+  template <class D, class R>
+  bool sendPresence(D& driver, R& radio, const Context& c) {
+    bool pos_ok = cfg.send_position && c.gps_valid && drive_state == 2;
+    if (!cfg.send_nodeinfo && !pos_ok && !pending_text)
+      return true;   // nothing sendable this cycle: no-op, keep the cadence
+    uint8_t kinds[3]; int nk = 0;
+    bool rotate = (driver.getEstAirtimeFor(60) * 2 + 120) > 2500;
+    if (!pos_ok)     kinds[nk++] = 0;                                    // NodeInfo only
+    else if (rotate) { kinds[nk++] = presence_rot; presence_rot ^= 1; }  // alternate
+    else             { kinds[nk++] = 0; kinds[nk++] = 1; }               // both
+    if (pending_text) kinds[nk++] = 2;
+    return sendKinds(driver, radio, c, kinds, nk);
   }
 
 public:
@@ -416,10 +461,13 @@ public:
     else if (flood_hours_seen == 0) snprintf(txt, sizeof(txt), "txt%dx(noadv)", (int)cfg.text_mult);
     else snprintf(txt, sizeof(txt), "txt%dx~%dh", (int)cfg.text_mult,
                   (int)(flood_hours_seen / cfg.text_mult));
+    char ivl[10];
+    if (cfg.interval_mins == 0) strcpy(ivl, "i:park");
+    else snprintf(ivl, sizeof(ivl), "i%dm", (int)cfg.interval_mins);
     snprintf(reply, 160,
-             "mtbeacon %s %sMHz%s %s %s(SF%d BW%d) %ddBm%s %s%s %s !%08lx",
+             "mtbeacon %s %sMHz%s %s %s(SF%d BW%d) %s %ddBm%s %s%s %s !%08lx",
              cfg.enabled ? "ON" : "off", fbuf, cfg.freq_override > 0.0f ? "*" : "",
-             r.name, p.name, (int)cfg.sf, (int)cfg.bw,
+             r.name, p.name, (int)cfg.sf, (int)cfg.bw, ivl,
              (int)ep, ep < cfg.tx_power ? "(cap)" : "",
              cfg.send_nodeinfo ? "+info" : "", cfg.send_position ? "+pos" : "",
              txt, (unsigned long)node_num);
@@ -467,7 +515,7 @@ public:
       beaconStatus(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printBeaconHelp();
-      strcpy(reply, "mtbeacon: status on off send | preset region freq power text text.mult nodeinfo position | presets regions");
+      strcpy(reply, "mtbeacon: status on off send | interval preset region freq power text text.mult nodeinfo position | presets regions");
     } else if (memcmp(a, "nodeinfo ", 9) == 0) {
       cfg.send_nodeinfo = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - nodeinfo %s", cfg.send_nodeinfo ? "on" : "off");
@@ -520,6 +568,12 @@ public:
         else { cfg.freq_override = f; recompute(); save(fs);
                strcpy(reply, "OK - freq "); appendFreq(reply, f); strcat(reply, " MHz (override)"); }
       }
+    } else if (memcmp(a, "interval ", 9) == 0) {
+      int m = atoi(a + 9);
+      if (m < 0 || m > 1440) { strcpy(reply, "Error: interval 0-1440 min (0 = park-only)"); }
+      else { cfg.interval_mins = m; scheduleNextPresence(); save(fs);
+             if (m == 0) strcpy(reply, "OK - periodic presence off (park-only)");
+             else sprintf(reply, "OK - presence every %d min", m); }
     } else if (memcmp(a, "power ", 6) == 0) {
       int p = atoi(a + 6);
       if (p < -9 || p > 22) { strcpy(reply, "Error: power -9..22 dBm"); }
@@ -619,30 +673,48 @@ public:
       drive_state = 0;   // no current GPS fix -> report "nofix" live (not latched)
     }
 
+    // periodic presence timer (0 = park-only). First shot is one interval out.
+    if (cfg.enabled && cfg.interval_mins > 0 && next_presence == 0) scheduleNextPresence();
+    bool presence_due = cfg.enabled && cfg.interval_mins > 0 && next_presence != 0 &&
+                        (int32_t)(now - next_presence) >= 0;
+
     bool manual = pending_send;
-    if (!manual && !park_event) return;
+    if (!manual && !park_event && !presence_due) return;
     if (busy) return;                                          // retune only when mesh idle
 
     // dedup: a park at (essentially) the same spot we last broadcast is skipped
-    bool new_spot = manual || !have_advert || !c.gps_valid ||
-                    distMeters(advert_lat, advert_lon, c.lat, c.lon) > cfg.stop_radius_m;
-    if (park_event && !new_spot) { park_reported = true; return; }
+    if (park_event && !manual) {
+      bool new_spot = !have_advert || !c.gps_valid ||
+                      distMeters(advert_lat, advert_lon, c.lat, c.lon) > cfg.stop_radius_m;
+      if (!new_spot) { park_reported = true; park_event = false; }
+    }
+    if (!manual && !park_event && !presence_due) return;
 
     if (cfg.enabled && textDue(now)) pending_text = true;      // arm the chat text if due
 
-    // 1) Meshtastic burst (live position from this fix)
-    if (!sendBurst(driver, radio, c)) {                        // channel busy (LBT)
-      hold_until = millis() + 15000;                           // back off, stay pending
-      return;
-    }
-    if (park_event) park_reported = true;
-    pending_send = false;
+    if (manual || park_event) {
+      // Full location update:
+      // 1) Meshtastic burst (live position from this fix)
+      if (!sendBurst(driver, radio, c)) {                      // channel busy (LBT)
+        hold_until = millis() + 15000;                         // back off, stay pending
+        return;
+      }
+      if (park_event) park_reported = true;
+      pending_send = false;
 
-    // 2) Request the MeshCore re-advert with the same fix -- both networks update
-    //    together. (Skipped if we have no location to share.)
-    if (c.gps_valid) {
-      readvert_lat = c.lat; readvert_lon = c.lon; readvert_pending = true;
-      advert_lat = c.lat; advert_lon = c.lon; have_advert = true;
+      // 2) Request the MeshCore re-advert with the same fix -- both networks
+      //    update together. (Skipped if we have no location to share.)
+      if (c.gps_valid) {
+        readvert_lat = c.lat; readvert_lon = c.lon; readvert_pending = true;
+        advert_lat = c.lat; advert_lon = c.lon; have_advert = true;
+      }
+    } else {
+      // Light periodic presence between park events.
+      if (!sendPresence(driver, radio, c)) {                   // channel busy (LBT)
+        hold_until = millis() + 15000;                         // back off, stay due
+        return;
+      }
     }
+    scheduleNextPresence();   // any burst is fresh presence; restart the cadence
   }
 };
