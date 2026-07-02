@@ -207,7 +207,7 @@ uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender
 #elif WITH_ESPNOW_BRIDGE
     reply_data[8] |= 0x03;  // is bridge, type ESP-NOW
 #endif
-    if (_prefs.disable_fwd) {   // is this repeater currently disabled
+    if (repeatDisabled()) {   // is this repeater currently disabled (pref or repeat-sleep)
       reply_data[8] |= 0x80;  // is disabled
     }
     // TODO:  add some kind of moving-window utilisation metric, so can query 'how busy' is this repeater
@@ -432,7 +432,7 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
-  if (_prefs.disable_fwd) return false;
+  if (repeatDisabled()) return false;
   if (packet->isRouteFlood()) {
     if (packet->getPathHashCount() >= _prefs.flood_max) return false;
     if (packet->getRouteType() == ROUTE_TYPE_FLOOD && packet->getPathHashCount() >= _prefs.flood_max_unscoped) return false;
@@ -781,7 +781,7 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
 void MyMesh::onControlDataRecv(mesh::Packet* packet) {
   uint8_t type = packet->payload[0] & 0xF0;    // just test upper 4 bits
   if (type == CTL_TYPE_NODE_DISCOVER_REQ && packet->payload_len >= 6
-      && !_prefs.disable_fwd && discover_limiter.allow(rtc_clock.getCurrentTime())
+      && !repeatDisabled() && discover_limiter.allow(rtc_clock.getCurrentTime())
   ) {
     int i = 1;
     uint8_t  filter = packet->payload[i++];

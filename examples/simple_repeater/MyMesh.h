@@ -150,6 +150,16 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
 
+  // Is forwarding currently off? Either the operator pref ('set repeat off') or,
+  // on a car node, the parked-long-enough repeat sleep (wakes when driving).
+  bool repeatDisabled() const {
+    return _prefs.disable_fwd
+#ifdef WITH_CAR_NODE
+        || _carnode.repeatSuppressed()
+#endif
+        ;
+  }
+
 protected:
   float getAirtimeBudgetFactor() const override {
     return _prefs.airtime_factor;

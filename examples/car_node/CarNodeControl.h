@@ -62,6 +62,7 @@ public:
     uint16_t park_secs;      // stationary time before a unified location update fires
     uint16_t stop_radius_m;  // movement within this radius counts as "stopped"
     uint16_t advert_delay_s; // gap between the Meshtastic burst and the MeshCore advert
+    uint16_t sleep_hours;    // parked this long -> stop repeating until driving (0=never)
     float    freq_override;  // 0 = auto (derived from region + preset)
     char     text[64];
     // derived from region/preset (recomputed on every change; persisted too)
@@ -87,7 +88,7 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC = 0x334E5241UL;  // 'ARN3' — car-node config v3 (+advert_delay)
+  static const uint32_t MAGIC = 0x344E5241UL;  // 'ARN4' — car-node config v4 (+sleep_hours)
 
   Config cfg;
   uint32_t node_num = 0;
@@ -98,6 +99,7 @@ private:
   uint16_t flood_hours_seen = 0;       // last-known flood-advert interval (for status)
   bool     pending_text = false;       // include the chat text on the next burst
   bool     pending_send = false;       // a manual "carnode send" is queued
+  bool     sleep_announced = false;    // last repeat-sleep state we logged to serial
 
   // --- park detection state ---
   double   anchor_lat = 0, anchor_lon = 0;  // reference point we measure movement from
@@ -145,6 +147,7 @@ private:
     cfg.park_secs = 300;       // stopped for 5 min -> push a location update
     cfg.stop_radius_m = 30;    // GPS jitter / small repositioning still counts as parked
     cfg.advert_delay_s = 10;   // MeshCore advert fires 10 s after the Meshtastic burst
+    cfg.sleep_hours = 20;      // parked ~a day -> nobody's around; stop repeating
     strncpy(cfg.text, "MeshCore mobile node", sizeof(cfg.text) - 1);
     recompute();
   }
@@ -169,6 +172,7 @@ private:
     cfg.park_secs = constrain(cfg.park_secs, 30, 86400);
     cfg.stop_radius_m = constrain(cfg.stop_radius_m, 5, 2000);
     cfg.advert_delay_s = constrain(cfg.advert_delay_s, 0, 600);
+    cfg.sleep_hours = constrain(cfg.sleep_hours, 0, 720);
     cfg.enabled = cfg.enabled ? 1 : 0;
     cfg.text[sizeof(cfg.text) - 1] = 0;
     recompute();   // re-derive in case the preset/region tables changed
@@ -201,6 +205,7 @@ private:
     Serial.println(F("  park <sec>         stopped time before an update fires, 30-86400"));
     Serial.println(F("  radius <m>         movement within this counts as stopped, 5-2000"));
     Serial.println(F("  advertdelay <sec>  gap: Meshtastic burst -> MeshCore advert, 0-600"));
+    Serial.println(F("  sleep <hours>      parked this long -> stop repeating until driving, 0=never"));
     Serial.println(F("A location update fires ONCE when the vehicle parks (stopped >park sec),"));
     Serial.println(F("pushing the Meshtastic beacon AND a MeshCore re-advert together. Nothing"));
     Serial.println(F("is sent while driving; re-parking the same spot won't re-broadcast."));
@@ -378,10 +383,24 @@ public:
   // burst (ms), so the two park transmissions don't land on top of each other.
   uint32_t advertDelayMs() const { return (uint32_t)cfg.advert_delay_s * 1000UL; }
 
+  // True while the vehicle has sat still long enough (`carnode sleep <hours>`)
+  // that the repeater should stop forwarding — a car parked for a day is
+  // probably somewhere nobody needs a mobile repeater. Keyed off the park
+  // anchor's stationary clock (not drive_state), so losing the GPS fix in a
+  // garage does NOT wake the repeater; only actually moving does. Clears itself
+  // as soon as driving resumes (the anchor follows the vehicle and the clock
+  // restarts). Runtime-only: nothing is persisted, so a reboot starts awake.
+  bool repeatSuppressed() const {
+    if (!cfg.enabled || cfg.sleep_hours == 0 || !have_anchor) return false;
+    return (unsigned long)(millis() - stationary_since) >=
+           (unsigned long)cfg.sleep_hours * 3600000UL;
+  }
+
   // Compact one-line status for the repeater's home screen.
   void uiLine(char* out, size_t n) const {
     if (!cfg.enabled) { snprintf(out, n, "CarNode off"); return; }
-    const char* s = drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "no fix";
+    const char* s = repeatSuppressed() ? "sleeping"
+                  : drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "no fix";
     snprintf(out, n, "CarNode %s", s);
   }
 
@@ -408,12 +427,16 @@ public:
 
   // `carnode status` — the car-specific park behaviour + drive state.
   void carStatus(char* reply) {
-    const char* st = drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "nofix";
+    const char* st = repeatSuppressed() ? "sleeping"
+                   : drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "nofix";
+    char slp[10];
+    if (cfg.sleep_hours == 0) strcpy(slp, "slp:off");
+    else snprintf(slp, sizeof(slp), "slp%dh", (int)cfg.sleep_hours);
     snprintf(reply, 160,
-             "carnode %s [%s] park%ds r%dm adv%ds loc:%s !%08lx",
+             "carnode %s [%s] park%ds r%dm adv%ds %s loc:%s !%08lx",
              cfg.enabled ? "ON" : "off", st,
              (int)cfg.park_secs, (int)cfg.stop_radius_m, (int)cfg.advert_delay_s,
-             have_advert ? "set" : "none", (unsigned long)node_num);
+             slp, have_advert ? "set" : "none", (unsigned long)node_num);
   }
 
   // If `command` is `<verb>` (optionally followed by args), return a pointer to
@@ -524,7 +547,7 @@ public:
       carStatus(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printCarHelp();
-      strcpy(reply, "carnode: status on off send | park <sec> | radius <m> | advertdelay <sec>  (beacon RF is under 'mtbeacon')");
+      strcpy(reply, "carnode: status on off send | park <sec> | radius <m> | advertdelay <sec> | sleep <hours>  (beacon RF is under 'mtbeacon')");
     } else if (strcmp(a, "on") == 0) {          // alias of 'mtbeacon on'
       cfg.enabled = 1; save(fs); strcpy(reply, "OK - carnode on");
     } else if (strcmp(a, "off") == 0) {         // alias of 'mtbeacon off'
@@ -543,6 +566,12 @@ public:
       int s = atoi(a + 12);
       if (s < 0 || s > 600) { strcpy(reply, "Error: advertdelay 0-600 sec"); }
       else { cfg.advert_delay_s = s; save(fs); sprintf(reply, "OK - MeshCore advert %d s after Meshtastic burst", s); }
+    } else if (memcmp(a, "sleep ", 6) == 0) {
+      int h = atoi(a + 6);
+      if (h < 0 || h > 720) { strcpy(reply, "Error: sleep 0-720 hours (0 = never)"); }
+      else { cfg.sleep_hours = h; save(fs);
+             if (h == 0) strcpy(reply, "OK - repeat never sleeps");
+             else sprintf(reply, "OK - repeat sleeps after %d h parked, wakes on driving", h); }
     } else {
       strcpy(reply, "Unknown - try 'carnode help'");
     }
@@ -556,6 +585,16 @@ public:
   template <class D, class R>
   void tick(D& driver, R& radio, bool busy, const Context& c) {
     flood_hours_seen = c.flood_advert_hours;                   // keep current for textDue/status
+
+    // Log repeat-sleep transitions (the repeater itself polls repeatSuppressed()
+    // per packet; this is just operator visibility on the serial console).
+    bool slp = repeatSuppressed();
+    if (slp != sleep_announced) {
+      sleep_announced = slp;
+      Serial.println(slp ? F("carnode: parked past sleep limit - repeat OFF until driving")
+                         : F("carnode: repeat back ON"));
+    }
+
     if (!cfg.enabled && !pending_send) return;
     if ((int32_t)(millis() - hold_until) < 0) return;          // duty-cycle / LBT hold
 

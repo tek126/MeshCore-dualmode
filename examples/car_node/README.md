@@ -103,10 +103,11 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 
 | Command | Effect |
 | --- | --- |
-| `carnode` / `carnode status` | show drive state (nofix/driving/parked) + park config |
+| `carnode` / `carnode status` | show drive state (nofix/driving/parked/sleeping) + park config |
 | `carnode park <sec>` | stopped time before an update fires (30–86400, default 300) |
 | `carnode radius <m>` | movement within this counts as "stopped" (5–2000, default 30) |
 | `carnode advertdelay <sec>` | gap from the Meshtastic burst to the MeshCore advert (0–600, default 10) |
+| `carnode sleep <hours>` | parked this long → stop repeating until driving again (0–720, 0 = never, default 20) |
 
 **Park model.** The node watches its GPS fix. While the position keeps moving
 outside `radius` metres, it's *driving* and stays silent. Once the fix sits
@@ -127,8 +128,18 @@ The MeshCore location is persisted, so it survives a reboot while parked.
 > than using the `gps advert share` policy, so MeshCore updates *only* at park
 > time — not on every periodic advert.
 
-Defaults: US LongFast, 5-min park / 30 m radius, 22 dBm (region-capped), disabled
-until `mtbeacon on`. The OLED home screen shows `CarNode driving` / `parked`.
+**Repeat sleep.** A car parked for a day is probably somewhere nobody needs a
+mobile repeater. After the vehicle has sat still for `sleep` hours (default 20)
+the node **stops forwarding** MeshCore traffic — it still receives, answers its
+own commands, adverts, and beacons — and remote status queries report it as
+disabled. It wakes the moment driving is detected (the parked fix moves outside
+`radius`). Losing the GPS fix while parked (underground garage) does *not* wake
+it; only movement does. The sleep state is runtime-only: a reboot starts awake,
+and `carnode sleep 0` disables the feature.
+
+Defaults: US LongFast, 5-min park / 30 m radius, 22 dBm (region-capped), 20 h
+repeat sleep, disabled until `mtbeacon on`. The OLED home screen shows
+`CarNode driving` / `parked` / `sleeping`.
 
 ## Scope / etiquette
 
