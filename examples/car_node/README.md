@@ -30,14 +30,21 @@ single-sourced in `meshtastic_beacon` via `-I examples/meshtastic_beacon`.
 
 ## Building
 
-Both supported boards expose GPS UART pins in their base variant, so an external
-NMEA GPS module is all the extra hardware you need. GPS defaults **on** for these
-builds.
+The Heltec boards expose GPS UART pins in their base variant, so an external
+NMEA GPS module is all the extra hardware you need; the T1000-E has GPS onboard.
+GPS defaults **on** for these builds.
 
 ```
-pio run -e heltec_v4_carnode      # Heltec V4   (ESP32-S3, SX1262)
-pio run -e Heltec_t114_carnode    # Heltec T114 (nRF52840, SX1262)
+pio run -e heltec_v4_carnode          # Heltec V4     (ESP32-S3, SX1262)
+pio run -e Heltec_t114_carnode        # Heltec T114   (nRF52840, SX1262)
+pio run -e t1000e_dualmode_carnode    # Seeed T1000-E (nRF52840, LR1110)
 ```
+
+The T1000-E build is the [dual-mode](../dualmode/) firmware: `companion_radio`
+is co-compiled alongside the repeater and a 5x button press reboots into the
+other mode. The car node runs in **repeater mode**; switch to companion mode and
+it's a normal phone-paired MeshCore node. Onboard GPS, button and buzzer — no
+external hardware at all.
 
 The V4 env (the T114 one is the same shape, plus `-D ENV_INCLUDE_GPS=1` since the
 T114 repeater base doesn't enable GPS by default):
@@ -66,6 +73,10 @@ overridable via `-D`) and the node hibernates through `board.powerOff()`:
 
 - **T114** — true system-off (`sd_power_system_off`); GPS is powered down. Wakes
   on the user button / reset.
+- **T1000-E** — same system-off via `T1000eBoard::powerOff()` (GPS and sensor
+  rails powered down, button SENSE wake). Repeater mode only — a 5x press still
+  switches modes, a ~3 s hold hibernates. In companion mode the usual companion
+  button behaviour applies instead.
 - **V4** — button-only deep sleep (`HeltecV4Board::hibernateButtonWake`): it
   stays asleep through incoming LoRa traffic and revives **only** on the user
   button. Because that button is GPIO0 (the BOOT strapping pin), the firmware
@@ -73,9 +84,9 @@ overridable via `-D`) and the node hibernates through `board.powerOff()`:
   safest — holding GPIO0 down through the reset can drop the chip into
   serial-download mode instead of booting.
 
-Detection uses the shared `MomentaryButton user_btn` (handles the active-low
-logic), so it works on any board that declares one. The OLED briefly shows
-"Hibernating..." before the board powers down.
+Detection uses the shared `MomentaryButton user_btn` (handles each board's
+button polarity), so it works on any board that declares one. The OLED briefly
+shows "Hibernating..." before the board powers down.
 
 ## Runtime control
 

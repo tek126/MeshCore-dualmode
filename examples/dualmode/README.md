@@ -73,3 +73,8 @@ lib_deps = ${env:t1000e_dualmode.lib_deps}
 In the `+mtbeacon` build the beacon is active only in Repeater mode; configure it
 over the repeater's serial CLI (`mtbeacon ...`). See the beacon project for the
 add-on source and full docs.
+
+There is also `[env:t1000e_dualmode_carnode]`, where the repeater side is the
+[car node](../car_node/) instead: park-triggered live-GPS Meshtastic beacon,
+periodic presence, repeat sleep, and hold-to-hibernate (~3 s; a 5x press still
+switches modes). The onboard GPS defaults on in repeater mode.

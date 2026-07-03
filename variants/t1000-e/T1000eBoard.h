@@ -90,4 +90,16 @@ public:
 
     sd_power_system_off();
   }
+
+  // Car-node hold-to-hibernate. powerOff() already shuts the peripherals down,
+  // waits for button release and arms a SENSE-HIGH button wake -- but its
+  // sd_power_system_off() just returns without powering off when the SoftDevice
+  // isn't enabled (the repeater side never starts BLE), so enter SYSTEMOFF via
+  // the POWER register directly in that case. Wake is a reset. Does not return.
+  void hibernateButtonWake(int pin_btn) {
+    (void)pin_btn;   // powerOff() uses BUTTON_PIN (same button)
+    powerOff();
+    NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter;
+    while (1) ;
+  }
 };

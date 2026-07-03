@@ -8,6 +8,9 @@
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/SensorManager.h>
 #include <helpers/sensors/LocationProvider.h>
+#ifdef WITH_CAR_NODE
+  #include <helpers/ui/MomentaryButton.h>
+#endif
 #ifdef DISPLAY_CLASS
   #include "NullDisplayDriver.h"
 #endif
@@ -39,6 +42,9 @@ extern T1000eBoard board;
 extern WRAPPER_CLASS radio_driver;
 extern VolatileRTCClock rtc_clock;
 extern T1000SensorManager sensors;
+#ifdef WITH_CAR_NODE
+extern MomentaryButton user_btn;   // hold-to-hibernate (simple_repeater main.cpp)
+#endif
 
 bool radio_init();
 mesh::LocalIdentity radio_new_identity();
