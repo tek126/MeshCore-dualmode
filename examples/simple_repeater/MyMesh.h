@@ -108,6 +108,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #endif
 #ifdef WITH_CAR_NODE
   CarNodeControl _carnode;
+  bool carnode_sleeping = false;     // park sleep currently has repeat forced off
+  bool carnode_restore_fwd = false;  // repeat was ON when the sleep tripped -> restore on wake
 #endif
   uint8_t reply_data[MAX_PACKET_PAYLOAD];
   uint8_t reply_path[MAX_PATH_SIZE];
@@ -150,14 +152,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
 
-  // Is forwarding currently off? Either the operator pref ('set repeat off') or,
-  // on a car node, the parked-long-enough repeat sleep (wakes when driving).
+  // Is forwarding currently off? The 'set repeat on|off' pref. On a car node
+  // the park sleep toggles this same pref (see the carnode block in loop()),
+  // so there is one switch and 'get repeat' / remote status always show it.
   bool repeatDisabled() const {
-    return _prefs.disable_fwd
-#ifdef WITH_CAR_NODE
-        || _carnode.repeatSuppressed()
-#endif
-        ;
+    return _prefs.disable_fwd;
   }
 
 protected:

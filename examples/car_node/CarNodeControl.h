@@ -430,11 +430,13 @@ public:
 
   // True while the vehicle has sat still long enough (`carnode sleep <hours>`)
   // that the repeater should stop forwarding — a car parked for a day is
-  // probably somewhere nobody needs a mobile repeater. Keyed off the park
+  // probably somewhere nobody needs a mobile repeater. The repeater polls this
+  // each loop and toggles its actual 'repeat' pref to match (the same switch as
+  // 'set repeat on|off'), so the state is visible everywhere. Keyed off the park
   // anchor's stationary clock (not drive_state), so losing the GPS fix in a
   // garage does NOT wake the repeater; only actually moving does. Clears itself
   // as soon as driving resumes (the anchor follows the vehicle and the clock
-  // restarts). Runtime-only: nothing is persisted, so a reboot starts awake.
+  // restarts). Runtime-only: nothing is persisted here, so a reboot starts awake.
   bool repeatSuppressed() const {
     if (!cfg.enabled || cfg.sleep_hours == 0 || !have_anchor) return false;
     return (unsigned long)(millis() - stationary_since) >=
@@ -640,8 +642,8 @@ public:
   void tick(D& driver, R& radio, bool busy, const Context& c) {
     flood_hours_seen = c.flood_advert_hours;                   // keep current for textDue/status
 
-    // Log repeat-sleep transitions (the repeater itself polls repeatSuppressed()
-    // per packet; this is just operator visibility on the serial console).
+    // Log repeat-sleep transitions (the repeater polls repeatSuppressed() each
+    // loop and toggles its repeat pref; this is just serial-console visibility).
     bool slp = repeatSuppressed();
     if (slp != sleep_announced) {
       sleep_announced = slp;

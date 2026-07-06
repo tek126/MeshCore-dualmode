@@ -1396,6 +1396,23 @@ void MyMesh::loop() {
       sendSelfAdvertisement((int)_carnode.advertDelayMs(), true);  // flood re-advert with parked location
       updateFloodAdvertTimer();            // push the next periodic flood advert out
     }
+
+    // Repeat sleep: parked past the limit -> toggle the actual repeat switch
+    // off (the same pref as 'set repeat on|off'), so forwarding, 'get repeat'
+    // and remote status all agree. Waking (driving detected) restores repeat
+    // only if it was on when the sleep tripped, so an operator's own
+    // 'set repeat off' survives a park-sleep cycle. Not saved to prefs here:
+    // a reboot starts awake, per the documented sleep semantics.
+    bool slp = _carnode.repeatSuppressed();
+    if (slp != carnode_sleeping) {
+      carnode_sleeping = slp;
+      if (slp) {
+        carnode_restore_fwd = !_prefs.disable_fwd;
+        _prefs.disable_fwd = 1;
+      } else if (carnode_restore_fwd) {
+        _prefs.disable_fwd = 0;
+      }
+    }
   }
 #endif
 

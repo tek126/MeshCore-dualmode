@@ -150,12 +150,14 @@ presence cycles when due.
 
 **Repeat sleep.** A car parked for a day is probably somewhere nobody needs a
 mobile repeater. After the vehicle has sat still for `sleep` hours (default 20)
-the node **stops forwarding** MeshCore traffic — it still receives, answers its
-own commands, adverts, and beacons — and remote status queries report it as
-disabled. It wakes the moment driving is detected (the parked fix moves outside
-`radius`). Losing the GPS fix while parked (underground garage) does *not* wake
-it; only movement does. The sleep state is runtime-only: a reboot starts awake,
-and `carnode sleep 0` disables the feature.
+the node turns **repeat off** — the same switch as `set repeat off`, so
+`get repeat`, remote status and the actual forwarding all agree — while it still
+receives, answers its own commands, adverts, and beacons. Repeat switches back
+on the moment driving is detected (the parked fix moves outside `radius`);
+if *you* had set repeat off before the sleep tripped, waking leaves it off.
+Losing the GPS fix while parked (underground garage) does *not* wake it; only
+movement does. The sleep toggle is not persisted: a reboot starts awake, and
+`carnode sleep 0` disables the feature.
 
 Defaults: US LongFast, 5-min park / 30 m radius, 30-min presence, 22 dBm
 (region-capped), 20 h repeat sleep, disabled until `mtbeacon on`. The OLED home
