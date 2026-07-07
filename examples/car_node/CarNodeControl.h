@@ -54,6 +54,14 @@
   #define MT_HW_MODEL 255
 #endif
 
+// The fix must sit outside `stop_radius_m` for this long, continuously, before
+// it counts as driving. Without this, a single multipath outlier re-anchors and
+// resets the parked/sleep clock — one bad fix per `park` window keeps a parked
+// car in "driving" forever.
+#ifndef CAR_NODE_MOVE_CONFIRM_MS
+  #define CAR_NODE_MOVE_CONFIRM_MS 15000UL
+#endif
+
 class CarNodeControl {
 public:
   struct Config {
@@ -107,12 +115,15 @@ private:
   bool     pending_text = false;       // include the chat text on the next burst
   bool     pending_send = false;       // a manual "carnode send" is queued
   bool     sleep_announced = false;    // last repeat-sleep state we logged to serial
+  uint8_t  state_announced = 255;      // last drive_state we logged to serial
   unsigned long next_presence = 0;     // when the next periodic presence is due (0=unscheduled)
   uint8_t  presence_rot = 0;           // alternates NodeInfo/Position when rotating
 
   // --- park detection state ---
   double   anchor_lat = 0, anchor_lon = 0;  // reference point we measure movement from
   unsigned long stationary_since = 0;       // when we last started sitting near the anchor
+  unsigned long outside_since = 0;          // fix beyond radius since (0 = currently inside)
+  int      last_dist_m = -1;                // last fix's distance from the anchor (status; -1 = n/a)
   bool     have_anchor = false;
   bool     park_reported = false;           // already reported the current parked spot
   uint8_t  drive_state = 0;                 // 0=no fix, 1=driving, 2=parked
@@ -476,15 +487,23 @@ public:
   }
 
   // `carnode status` — the car-specific park behaviour + drive state.
+  // The [..] block includes live tracking: distance of the current fix from the
+  // park anchor and how long the stationary clock has been running — so GPS
+  // jitter (fix wandering past `radius`, which restarts the clock) is visible.
   void carStatus(char* reply) {
     const char* st = repeatSuppressed() ? "sleeping"
                    : drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "nofix";
+    char trk[28] = {0};
+    if (have_anchor && last_dist_m >= 0) {
+      unsigned long mins = (unsigned long)(millis() - stationary_since) / 60000UL;
+      snprintf(trk, sizeof(trk), " d%dm %lumin", last_dist_m, mins);
+    }
     char slp[10];
     if (cfg.sleep_hours == 0) strcpy(slp, "slp:off");
     else snprintf(slp, sizeof(slp), "slp%dh", (int)cfg.sleep_hours);
     snprintf(reply, 160,
-             "carnode %s [%s] park%ds r%dm adv%ds %s loc:%s !%08lx",
-             cfg.enabled ? "ON" : "off", st,
+             "carnode %s [%s%s] park%ds r%dm adv%ds %s loc:%s !%08lx",
+             cfg.enabled ? "ON" : "off", st, trk,
              (int)cfg.park_secs, (int)cfg.stop_radius_m, (int)cfg.advert_delay_s,
              slp, have_advert ? "set" : "none", (unsigned long)node_num);
   }
@@ -657,22 +676,47 @@ public:
     unsigned long now = millis();
 
     // --- track movement -> detect the parked transition (needs a valid fix) ---
+    // Movement must persist outside the radius for CAR_NODE_MOVE_CONFIRM_MS
+    // before it counts as driving: a brief GPS excursion (multipath outlier)
+    // neither re-anchors nor resets the parked/sleep clock.
     bool park_event = false;
     if (cfg.enabled && c.gps_valid) {
       if (!have_anchor) {
         anchor_lat = c.lat; anchor_lon = c.lon; stationary_since = now;
         have_anchor = true; park_reported = false; drive_state = 1;
-      } else if (distMeters(anchor_lat, anchor_lon, c.lat, c.lon) > cfg.stop_radius_m) {
-        anchor_lat = c.lat; anchor_lon = c.lon;                // moving: follow the vehicle
-        stationary_since = now; park_reported = false; drive_state = 1;
-      } else {                                                 // sitting near the anchor
-        if ((now - stationary_since) >= (unsigned long)cfg.park_secs * 1000UL) {
-          drive_state = 2;                                     // parked
-          if (!park_reported) park_event = true;
+        outside_since = 0; last_dist_m = 0;
+      } else {
+        double d = distMeters(anchor_lat, anchor_lon, c.lat, c.lon);
+        last_dist_m = (int)(d + 0.5);
+        if (d > cfg.stop_radius_m) {
+          if (outside_since == 0) outside_since = now;
+          if ((unsigned long)(now - outside_since) >= CAR_NODE_MOVE_CONFIRM_MS) {
+            anchor_lat = c.lat; anchor_lon = c.lon;            // moving: follow the vehicle
+            stationary_since = now; park_reported = false; drive_state = 1;
+            outside_since = 0;
+          }
+          // else: not confirmed yet — hold state, keep the stationary clock
+        } else {
+          outside_since = 0;                                   // sitting near the anchor
+          if ((now - stationary_since) >= (unsigned long)cfg.park_secs * 1000UL) {
+            drive_state = 2;                                   // parked
+            if (!park_reported) park_event = true;
+          }
         }
       }
     } else if (cfg.enabled) {
       drive_state = 0;   // no current GPS fix -> report "nofix" live (not latched)
+    }
+
+    // Log drive-state transitions to the serial console (diagnostics).
+    if (cfg.enabled && drive_state != state_announced) {
+      state_announced = drive_state;
+      Serial.print(F("carnode: "));
+      Serial.print(drive_state == 2 ? F("parked") : drive_state == 1 ? F("driving") : F("no fix"));
+      if (have_anchor && last_dist_m >= 0) {
+        Serial.print(F(" (")); Serial.print(last_dist_m); Serial.print(F(" m from anchor)"));
+      }
+      Serial.println();
     }
 
     // periodic presence timer (0 = park-only). First shot is one interval out.
