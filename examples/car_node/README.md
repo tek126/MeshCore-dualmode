@@ -124,12 +124,15 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 **Park model.** The node watches its GPS fix. While the position keeps moving
 outside `radius` metres, it's *driving* and sends no location. Once the fix sits
 within `radius` for `park` seconds (default 5 min), the vehicle is *parked* and a
-single **unified update** fires. Movement must persist for ~15 s outside the
-radius before it counts as driving — a brief GPS excursion (multipath outlier)
-doesn't restart the parked clock. `carnode status` shows the live tracking
-(`d<n>m` = current fix's distance from the park anchor, `<n>min` = how long the
-stationary clock has run); if it flips to *driving* while the car sits still,
-the fix is wandering past `radius` — raise `carnode radius`. The update:
+single **unified update** fires. Two defenses make this reliable on a
+poorly-sited GPS (trunk mount, metallized glass): the park logic — and the
+position that gets broadcast — uses the **median of the last ~9 fixes**
+(~27 s window), so a single fix teleporting hundreds of metres is rejected
+outright; and movement must then persist for ~15 s outside the radius before it
+counts as driving. `carnode status` shows the live tracking (`d<n>m` = filtered
+fix's distance from the park anchor — `(raw)` while the filter warms up,
+`<n>min` = how long the stationary clock has run); if it still flips to
+*driving* while the car sits still, raise `carnode radius`. The update:
 
 1. a **Meshtastic** beacon burst (NodeInfo + Position [+ text]), and
 2. a **MeshCore** update — the repeater writes the parked fix into its

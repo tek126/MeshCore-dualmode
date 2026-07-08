@@ -62,6 +62,18 @@
   #define CAR_NODE_MOVE_CONFIRM_MS 15000UL
 #endif
 
+// Median fix filter: the park logic (and the broadcast position) uses the
+// component-wise median of the last few fixes instead of the instantaneous
+// one, so a single teleporting fix — hundreds of metres of multipath from a
+// poorly-sited antenna — is rejected outright no matter how far it jumps.
+// Samples are taken every SAMPLE_MS; ones older than STALE_MS are dropped.
+#ifndef CAR_NODE_FIX_SAMPLE_MS
+  #define CAR_NODE_FIX_SAMPLE_MS 3000UL
+#endif
+#ifndef CAR_NODE_FIX_STALE_MS
+  #define CAR_NODE_FIX_STALE_MS 60000UL
+#endif
+
 class CarNodeControl {
 public:
   struct Config {
@@ -118,6 +130,45 @@ private:
   uint8_t  state_announced = 255;      // last drive_state we logged to serial
   unsigned long next_presence = 0;     // when the next periodic presence is due (0=unscheduled)
   uint8_t  presence_rot = 0;           // alternates NodeInfo/Position when rotating
+
+  // --- median fix filter (defense against multipath outliers) ---
+  static const uint8_t FIXWIN = 9;          // 9 samples @ 3 s = ~27 s span, robust to 4 outliers
+  double   fw_lat[FIXWIN], fw_lon[FIXWIN];
+  unsigned long fw_ms[FIXWIN];
+  uint8_t  fw_head = 0, fw_count = 0;
+  unsigned long fw_last_sample = 0;
+  bool     fix_filtered = false;            // last tick's fix came from the median (status)
+
+  static double medianOf(double* v, uint8_t n) {
+    for (uint8_t i = 1; i < n; i++) {       // insertion sort; n <= FIXWIN
+      double x = v[i]; int8_t j = i - 1;
+      while (j >= 0 && v[j] > x) { v[j + 1] = v[j]; j--; }
+      v[j + 1] = x;
+    }
+    return v[n / 2];
+  }
+
+  // Sample the raw fix into the ring buffer and return the component-wise
+  // median of the recent samples. Until 3 fresh samples exist (first ~10 s
+  // of fix, or after a long GPS outage) the raw fix passes through.
+  bool filterFix(unsigned long now, double raw_lat, double raw_lon,
+                 double& out_lat, double& out_lon) {
+    if (fw_count == 0 || (unsigned long)(now - fw_last_sample) >= CAR_NODE_FIX_SAMPLE_MS) {
+      fw_lat[fw_head] = raw_lat; fw_lon[fw_head] = raw_lon; fw_ms[fw_head] = now;
+      fw_head = (fw_head + 1) % FIXWIN;
+      if (fw_count < FIXWIN) fw_count++;
+      fw_last_sample = now;
+    }
+    double la[FIXWIN], lo[FIXWIN]; uint8_t n = 0;
+    for (uint8_t i = 0; i < fw_count; i++) {
+      if ((unsigned long)(now - fw_ms[i]) <= CAR_NODE_FIX_STALE_MS) {
+        la[n] = fw_lat[i]; lo[n] = fw_lon[i]; n++;
+      }
+    }
+    if (n < 3) { out_lat = raw_lat; out_lon = raw_lon; return false; }
+    out_lat = medianOf(la, n); out_lon = medianOf(lo, n);
+    return true;
+  }
 
   // --- park detection state ---
   double   anchor_lat = 0, anchor_lon = 0;  // reference point we measure movement from
@@ -493,10 +544,11 @@ public:
   void carStatus(char* reply) {
     const char* st = repeatSuppressed() ? "sleeping"
                    : drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "nofix";
-    char trk[28] = {0};
+    char trk[32] = {0};
     if (have_anchor && last_dist_m >= 0) {
       unsigned long mins = (unsigned long)(millis() - stationary_since) / 60000UL;
-      snprintf(trk, sizeof(trk), " d%dm %lumin", last_dist_m, mins);
+      snprintf(trk, sizeof(trk), " d%dm%s %lumin", last_dist_m,
+               fix_filtered ? "" : "(raw)", mins);   // (raw) = median filter not warmed up yet
     }
     char slp[10];
     if (cfg.sleep_hours == 0) strcpy(slp, "slp:off");
@@ -675,23 +727,29 @@ public:
 
     unsigned long now = millis();
 
+    // Median-filter the fix: everything below (park logic, dedup, and the
+    // position that gets broadcast) sees the median of the recent samples,
+    // so one teleporting fix can't fake movement or misplace the park pin.
+    Context fc = c;
+    fix_filtered = c.gps_valid && filterFix(now, c.lat, c.lon, fc.lat, fc.lon);
+
     // --- track movement -> detect the parked transition (needs a valid fix) ---
     // Movement must persist outside the radius for CAR_NODE_MOVE_CONFIRM_MS
     // before it counts as driving: a brief GPS excursion (multipath outlier)
     // neither re-anchors nor resets the parked/sleep clock.
     bool park_event = false;
-    if (cfg.enabled && c.gps_valid) {
+    if (cfg.enabled && fc.gps_valid) {
       if (!have_anchor) {
-        anchor_lat = c.lat; anchor_lon = c.lon; stationary_since = now;
+        anchor_lat = fc.lat; anchor_lon = fc.lon; stationary_since = now;
         have_anchor = true; park_reported = false; drive_state = 1;
         outside_since = 0; last_dist_m = 0;
       } else {
-        double d = distMeters(anchor_lat, anchor_lon, c.lat, c.lon);
+        double d = distMeters(anchor_lat, anchor_lon, fc.lat, fc.lon);
         last_dist_m = (int)(d + 0.5);
         if (d > cfg.stop_radius_m) {
           if (outside_since == 0) outside_since = now;
           if ((unsigned long)(now - outside_since) >= CAR_NODE_MOVE_CONFIRM_MS) {
-            anchor_lat = c.lat; anchor_lon = c.lon;            // moving: follow the vehicle
+            anchor_lat = fc.lat; anchor_lon = fc.lon;          // moving: follow the vehicle
             stationary_since = now; park_reported = false; drive_state = 1;
             outside_since = 0;
           }
@@ -730,8 +788,8 @@ public:
 
     // dedup: a park at (essentially) the same spot we last broadcast is skipped
     if (park_event && !manual) {
-      bool new_spot = !have_advert || !c.gps_valid ||
-                      distMeters(advert_lat, advert_lon, c.lat, c.lon) > cfg.stop_radius_m;
+      bool new_spot = !have_advert || !fc.gps_valid ||
+                      distMeters(advert_lat, advert_lon, fc.lat, fc.lon) > cfg.stop_radius_m;
       if (!new_spot) { park_reported = true; park_event = false; }
     }
     if (!manual && !park_event && !presence_due) return;
@@ -740,8 +798,8 @@ public:
 
     if (manual || park_event) {
       // Full location update:
-      // 1) Meshtastic burst (live position from this fix)
-      if (!sendBurst(driver, radio, c)) {                      // channel busy (LBT)
+      // 1) Meshtastic burst (median-filtered position from this fix)
+      if (!sendBurst(driver, radio, fc)) {                     // channel busy (LBT)
         hold_until = millis() + 15000;                         // back off, stay pending
         return;
       }
@@ -750,13 +808,13 @@ public:
 
       // 2) Request the MeshCore re-advert with the same fix -- both networks
       //    update together. (Skipped if we have no location to share.)
-      if (c.gps_valid) {
-        readvert_lat = c.lat; readvert_lon = c.lon; readvert_pending = true;
-        advert_lat = c.lat; advert_lon = c.lon; have_advert = true;
+      if (fc.gps_valid) {
+        readvert_lat = fc.lat; readvert_lon = fc.lon; readvert_pending = true;
+        advert_lat = fc.lat; advert_lon = fc.lon; have_advert = true;
       }
     } else {
       // Light periodic presence between park events.
-      if (!sendPresence(driver, radio, c)) {                   // channel busy (LBT)
+      if (!sendPresence(driver, radio, fc)) {                  // channel busy (LBT)
         hold_until = millis() + 15000;                         // back off, stay due
         return;
       }
