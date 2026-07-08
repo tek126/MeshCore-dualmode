@@ -1341,7 +1341,12 @@ void MyMesh::loop() {
   // Time-slice a Meshtastic beacon onto the air when the mesh is idle. Restores
   // the repeater's current radio params (incl. any temp override) afterwards.
   {
-    bool busy = hasPendingWork() || radio_driver.isReceiving();
+    // isInRecvMode() is false while a MeshCore transmit is in flight (the packet
+    // has already been dequeued, so hasPendingWork() no longer sees it). Without
+    // this the beacon could retune the radio mid-transmit, aborting the send and
+    // leaving the radio in a state where the next CAD never completes.
+    bool busy = hasPendingWork() || radio_driver.isReceiving()
+             || !radio_driver.isInRecvMode();
     MtBeaconControl::Context ctx;
     ctx.node_name = _prefs.node_name;
     ctx.lat = _prefs.node_lat;

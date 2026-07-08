@@ -178,14 +178,32 @@ private:
   // Listen-before-talk: best-effort CAD on the (already-tuned) Meshtastic
   // channel. Returns true if it looks clear. Falls back to "proceed" if the
   // RadioLib CAD primitive isn't available.
+  //
+  // NOTE: we deliberately do NOT call RadioLib's blocking radio.scanChannel():
+  // its internal wait `while(!digitalRead(irq)) yield();` has no timeout, so a
+  // single missed CAD-done interrupt (e.g. after an aborted transmit leaves the
+  // radio in an odd state) spins the CPU forever and hard-hangs the whole node
+  // (the main loop never returns, serial goes dead — recoverable only by a power
+  // cycle). Instead we start the scan and poll the result under a millis()
+  // deadline, so LBT can never wedge the repeater.
   template <class R>
   bool channelClear(R& radio) {
 #ifdef RADIOLIB_CHANNEL_FREE
     for (int i = 0; i < 4; i++) {
-      if (radio.scanChannel() == RADIOLIB_CHANNEL_FREE) return true;
-      delay(20 + (long)random(0, 80));   // random backoff, then re-check
+      if (radio.startChannelScan() != RADIOLIB_ERR_NONE) return true;  // can't CAD -> proceed
+      unsigned long t0 = millis();
+      int16_t r = RADIOLIB_ERR_UNKNOWN;               // "still scanning" until CAD latches
+      while ((unsigned long)(millis() - t0) < 50) {   // bounded wait for a CAD result
+        r = radio.getChannelScanResult();
+        if (r != RADIOLIB_ERR_UNKNOWN) break;         // CAD_DONE or CAD_DETECTED
+        yield();
+      }
+      radio.standby();                                 // leave CAD mode deterministically
+      if (r == RADIOLIB_CHANNEL_FREE) return true;     // clear -> transmit
+      if (r != RADIOLIB_LORA_DETECTED) return true;    // timed out / error -> proceed, never hang
+      delay(20 + (long)random(0, 80));                 // activity detected: back off, re-check
     }
-    return false;
+    return false;                                      // busy on all attempts -> skip this burst
 #else
     (void)radio; return true;
 #endif
