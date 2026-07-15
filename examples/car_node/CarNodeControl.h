@@ -22,6 +22,10 @@
 //   * Location, then, still updates ONLY at park time. Re-parking in the same
 //     spot does not re-broadcast (dedup by `stop_radius_m`); `carnode send`
 //     forces an update.
+//   * Optional "home": `carnode home` stores the current spot. Parking within
+//     `home radius` of it turns repeating off immediately (same switch as the
+//     park sleep) and skips the park broadcast + periodic presence, so the
+//     home location never goes on the air. Driving away restores everything.
 //
 // The repeater drives the MeshCore side: after tick(), it calls takeReadvert()
 // and, if a location update is pending, writes it into NodePrefs and re-adverts.
@@ -99,6 +103,12 @@ public:
     uint8_t  cr;
     uint8_t  sync_word;
     uint16_t preamble;
+    // v6: "home" — parking within home_radius_m of this spot turns repeat off
+    // immediately and suppresses all broadcasts (new fields appended only, so
+    // the v5->v6 load migration can keep everything above).
+    uint8_t  have_home;
+    uint16_t home_radius_m;
+    double   home_lat, home_lon;
   };
 
   // Live per-tick context the repeater supplies. lat/lon are the CURRENT GPS fix
@@ -115,7 +125,8 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC = 0x354E5241UL;  // 'ARN5' — car-node config v5 (+interval_mins)
+  static const uint32_t MAGIC    = 0x364E5241UL;  // 'ARN6' — car-node config v6 (+home)
+  static const uint32_t MAGIC_V5 = 0x354E5241UL;  // 'ARN5' — v5 (migrated on load)
 
   Config cfg;
   uint32_t node_num = 0;
@@ -178,6 +189,9 @@ private:
   bool     have_anchor = false;
   bool     park_reported = false;           // already reported the current parked spot
   uint8_t  drive_state = 0;                 // 0=no fix, 1=driving, 2=parked
+  bool     at_home = false;                 // parked within home radius (repeat forced off, radio quiet)
+  double   cur_lat = 0, cur_lon = 0;        // last filtered fix (what 'carnode home' captures)
+  bool     cur_fix_valid = false;
 
   // --- MeshCore re-advert handoff + dedup ---
   double   advert_lat = 0, advert_lon = 0;  // last location we pushed to both networks
@@ -220,6 +234,8 @@ private:
     cfg.advert_delay_s = 10;   // MeshCore advert fires 10 s after the Meshtastic burst
     cfg.sleep_hours = 20;      // parked ~a day -> nobody's around; stop repeating
     cfg.interval_mins = 30;    // presence cadence between parks (like base mtbeacon)
+    cfg.have_home = 0;         // no home until 'carnode home' captures one
+    cfg.home_radius_m = 100;   // generous: home is "the driveway", not a parking spot
     strncpy(cfg.text, "MeshCore mobile node", sizeof(cfg.text) - 1);
     recompute();
   }
@@ -246,7 +262,9 @@ private:
     cfg.advert_delay_s = constrain(cfg.advert_delay_s, 0, 600);
     cfg.sleep_hours = constrain(cfg.sleep_hours, 0, 720);
     cfg.interval_mins = constrain(cfg.interval_mins, 0, 1440);
+    cfg.home_radius_m = constrain(cfg.home_radius_m, 5, 2000);
     cfg.enabled = cfg.enabled ? 1 : 0;
+    cfg.have_home = cfg.have_home ? 1 : 0;
     cfg.text[sizeof(cfg.text) - 1] = 0;
     recompute();   // re-derive in case the preset/region tables changed
   }
@@ -280,6 +298,9 @@ private:
     Serial.println(F("  radius <m>         movement within this counts as stopped, 5-2000"));
     Serial.println(F("  advertdelay <sec>  gap: Meshtastic burst -> MeshCore advert, 0-600"));
     Serial.println(F("  sleep <hours>      parked this long -> stop repeating until driving, 0=never"));
+    Serial.println(F("  home               set home = here; parking at home -> repeat off, radio quiet"));
+    Serial.println(F("  home clear         forget the home location"));
+    Serial.println(F("  home radius <m>    how close to home counts, 5-2000 (default 100)"));
     Serial.println(F("A location update fires ONCE when the vehicle parks (stopped >park sec),"));
     Serial.println(F("pushing the Meshtastic beacon AND a MeshCore re-advert together. Nothing"));
     Serial.println(F("is sent while driving; re-parking the same spot won't re-broadcast."));
@@ -304,14 +325,32 @@ private:
   // Listen-before-talk: best-effort CAD on the (already-tuned) Meshtastic
   // channel. Returns true if it looks clear. Falls back to "proceed" if the
   // RadioLib CAD primitive isn't available.
+  //
+  // NOTE: we deliberately do NOT call RadioLib's blocking radio.scanChannel():
+  // its internal wait `while(!digitalRead(irq)) yield();` has no timeout, so a
+  // single missed CAD-done interrupt (e.g. after an aborted transmit leaves the
+  // radio in an odd state) spins the CPU forever and hard-hangs the whole node
+  // (the main loop never returns, serial goes dead — recoverable only by a power
+  // cycle). Instead we start the scan and poll the result under a millis()
+  // deadline, so LBT can never wedge the repeater. (Ported from mtbeacon v0.2.1.)
   template <class R>
   bool channelClear(R& radio) {
 #ifdef RADIOLIB_CHANNEL_FREE
     for (int i = 0; i < 4; i++) {
-      if (radio.scanChannel() == RADIOLIB_CHANNEL_FREE) return true;
-      delay(20 + (long)random(0, 80));   // random backoff, then re-check
+      if (radio.startChannelScan() != RADIOLIB_ERR_NONE) return true;  // can't CAD -> proceed
+      unsigned long t0 = millis();
+      int16_t r = RADIOLIB_ERR_UNKNOWN;               // "still scanning" until CAD latches
+      while ((unsigned long)(millis() - t0) < 50) {   // bounded wait for a CAD result
+        r = radio.getChannelScanResult();
+        if (r != RADIOLIB_ERR_UNKNOWN) break;         // CAD_DONE or CAD_DETECTED
+        yield();
+      }
+      radio.standby();                                 // leave CAD mode deterministically
+      if (r == RADIOLIB_CHANNEL_FREE) return true;     // clear -> transmit
+      if (r != RADIOLIB_LORA_DETECTED) return true;    // timed out / error -> proceed, never hang
+      delay(20 + (long)random(0, 80));                 // activity detected: back off, re-check
     }
-    return false;
+    return false;                                      // busy on all attempts -> skip this burst
 #else
     (void)radio; return true;
 #endif
@@ -441,12 +480,24 @@ public:
     File f = fs->open(CAR_NODE_FILE);
 #endif
     if (f) {
-      Config tmp;
-      memset(&tmp, 0, sizeof(tmp));
-      int n = f.read((uint8_t*)&tmp, sizeof(tmp));
+      uint8_t buf[sizeof(Config)];
+      memset(buf, 0, sizeof(buf));
+      int n = f.read(buf, sizeof(buf));
       f.close();
-      if (n == (int)sizeof(tmp) && tmp.magic == MAGIC) {
-        cfg = tmp;
+      uint32_t magic = 0;
+      if (n >= 4) memcpy(&magic, buf, sizeof(magic));
+      if (n == (int)sizeof(Config) && magic == MAGIC) {
+        memcpy(&cfg, buf, sizeof(cfg));
+        sanitize();
+      } else if (magic == MAGIC_V5 && n > 4 && n <= (int)sizeof(Config)) {
+        // v5 -> v6: the home fields were appended, so the v5 prefix layout is
+        // unchanged — copy what the file has, then force defaults for the new
+        // fields (the copy may have clobbered ones that landed in old padding).
+        memcpy(&cfg, buf, n);
+        cfg.magic = MAGIC;
+        cfg.have_home = 0;
+        cfg.home_radius_m = 100;
+        cfg.home_lat = cfg.home_lon = 0;
         sanitize();
       }
     }
@@ -490,17 +541,22 @@ public:
   // burst (ms), so the two park transmissions don't land on top of each other.
   uint32_t advertDelayMs() const { return (uint32_t)cfg.advert_delay_s * 1000UL; }
 
-  // True while the vehicle has sat still long enough (`carnode sleep <hours>`)
-  // that the repeater should stop forwarding — a car parked for a day is
-  // probably somewhere nobody needs a mobile repeater. The repeater polls this
-  // each loop and toggles its actual 'repeat' pref to match (the same switch as
-  // 'set repeat on|off'), so the state is visible everywhere. Keyed off the park
-  // anchor's stationary clock (not drive_state), so losing the GPS fix in a
-  // garage does NOT wake the repeater; only actually moving does. Clears itself
-  // as soon as driving resumes (the anchor follows the vehicle and the clock
-  // restarts). Runtime-only: nothing is persisted here, so a reboot starts awake.
+  // True while the repeater should stop forwarding, for either reason:
+  //   * parked at HOME (`carnode home`) — repeat goes off as soon as the park
+  //     is detected, no waiting; home presumably has fixed coverage already; or
+  //   * parked anywhere past `carnode sleep <hours>` — a car parked for a day
+  //     is probably somewhere nobody needs a mobile repeater.
+  // The repeater polls this each loop and toggles its actual 'repeat' pref to
+  // match (the same switch as 'set repeat on|off'), so the state is visible
+  // everywhere. Keyed off the park anchor (not drive_state), so losing the GPS
+  // fix in a garage does NOT wake the repeater; only actually moving does.
+  // Clears itself as soon as driving resumes (the anchor follows the vehicle,
+  // the clock restarts, at_home drops). Runtime-only: nothing is persisted
+  // here, so a reboot starts awake.
   bool repeatSuppressed() const {
-    if (!cfg.enabled || cfg.sleep_hours == 0 || !have_anchor) return false;
+    if (!cfg.enabled || !have_anchor) return false;
+    if (at_home) return true;
+    if (cfg.sleep_hours == 0) return false;
     return (unsigned long)(millis() - stationary_since) >=
            (unsigned long)cfg.sleep_hours * 3600000UL;
   }
@@ -508,7 +564,7 @@ public:
   // Compact one-line status for the repeater's home screen.
   void uiLine(char* out, size_t n) const {
     if (!cfg.enabled) { snprintf(out, n, "CarNode off"); return; }
-    const char* s = repeatSuppressed() ? "sleeping"
+    const char* s = at_home ? "home" : repeatSuppressed() ? "sleeping"
                   : drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "no fix";
     snprintf(out, n, "CarNode %s", s);
   }
@@ -542,7 +598,7 @@ public:
   // park anchor and how long the stationary clock has been running — so GPS
   // jitter (fix wandering past `radius`, which restarts the clock) is visible.
   void carStatus(char* reply) {
-    const char* st = repeatSuppressed() ? "sleeping"
+    const char* st = at_home ? "home" : repeatSuppressed() ? "sleeping"
                    : drive_state == 2 ? "parked" : drive_state == 1 ? "driving" : "nofix";
     char trk[32] = {0};
     if (have_anchor && last_dist_m >= 0) {
@@ -553,11 +609,14 @@ public:
     char slp[10];
     if (cfg.sleep_hours == 0) strcpy(slp, "slp:off");
     else snprintf(slp, sizeof(slp), "slp%dh", (int)cfg.sleep_hours);
+    char hm[10];
+    if (!cfg.have_home) strcpy(hm, "hm:off");
+    else snprintf(hm, sizeof(hm), "hm%dm", (int)cfg.home_radius_m);
     snprintf(reply, 160,
-             "carnode %s [%s%s] park%ds r%dm adv%ds %s loc:%s !%08lx",
+             "carnode %s [%s%s] park%ds r%dm adv%ds %s %s loc:%s !%08lx",
              cfg.enabled ? "ON" : "off", st, trk,
              (int)cfg.park_secs, (int)cfg.stop_radius_m, (int)cfg.advert_delay_s,
-             slp, have_advert ? "set" : "none", (unsigned long)node_num);
+             slp, hm, have_advert ? "set" : "none", (unsigned long)node_num);
   }
 
   // If `command` is `<verb>` (optionally followed by args), return a pointer to
@@ -674,7 +733,7 @@ public:
       carStatus(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printCarHelp();
-      strcpy(reply, "carnode: status on off send | park <sec> | radius <m> | advertdelay <sec> | sleep <hours>  (beacon RF is under 'mtbeacon')");
+      strcpy(reply, "carnode: status on off send | park <sec> | radius <m> | advertdelay <sec> | sleep <hours> | home [clear|radius <m>]");
     } else if (strcmp(a, "on") == 0) {          // alias of 'mtbeacon on'
       cfg.enabled = 1; save(fs); strcpy(reply, "OK - carnode on");
     } else if (strcmp(a, "off") == 0) {         // alias of 'mtbeacon off'
@@ -699,6 +758,26 @@ public:
       else { cfg.sleep_hours = h; save(fs);
              if (h == 0) strcpy(reply, "OK - repeat never sleeps");
              else sprintf(reply, "OK - repeat sleeps after %d h parked, wakes on driving", h); }
+    } else if (memcmp(a, "home", 4) == 0 && (a[4] == 0 || a[4] == ' ')) {
+      const char* h = a + 4;
+      while (*h == ' ') h++;
+      if (*h == 0) {   // "carnode home" — capture the current (filtered) fix as home
+        if (!cur_fix_valid) { strcpy(reply, "Error: no GPS fix - can't set home"); }
+        else if (!fix_filtered) { strcpy(reply, "Error: GPS filter warming up - retry in ~15 sec"); }
+        else {
+          cfg.have_home = 1; cfg.home_lat = cur_lat; cfg.home_lon = cur_lon; save(fs);
+          sprintf(reply, "OK - home set: parking within %d m turns repeat off",
+                  (int)cfg.home_radius_m);
+        }
+      } else if (strcmp(h, "clear") == 0) {
+        cfg.have_home = 0; save(fs); strcpy(reply, "OK - home cleared");
+      } else if (memcmp(h, "radius ", 7) == 0) {
+        int m = atoi(h + 7);
+        if (m < 5 || m > 2000) { strcpy(reply, "Error: home radius 5-2000 m"); }
+        else { cfg.home_radius_m = m; save(fs); sprintf(reply, "OK - home = within %d m", m); }
+      } else {
+        strcpy(reply, "Unknown - carnode home [clear | radius <m>]");
+      }
     } else {
       strcpy(reply, "Unknown - try 'carnode help'");
     }
@@ -712,26 +791,30 @@ public:
   template <class D, class R>
   void tick(D& driver, R& radio, bool busy, const Context& c) {
     flood_hours_seen = c.flood_advert_hours;                   // keep current for textDue/status
+    unsigned long now = millis();
+
+    // Median-filter the fix: everything below (park logic, dedup, and the
+    // position that gets broadcast) sees the median of the recent samples,
+    // so one teleporting fix can't fake movement or misplace the park pin.
+    // Runs before the early returns so the filter stays warm through holds
+    // and `carnode home` can capture the current spot even while disabled.
+    Context fc = c;
+    fix_filtered = c.gps_valid && filterFix(now, c.lat, c.lon, fc.lat, fc.lon);
+    cur_fix_valid = fc.gps_valid;
+    if (fc.gps_valid) { cur_lat = fc.lat; cur_lon = fc.lon; }
 
     // Log repeat-sleep transitions (the repeater polls repeatSuppressed() each
     // loop and toggles its repeat pref; this is just serial-console visibility).
     bool slp = repeatSuppressed();
     if (slp != sleep_announced) {
       sleep_announced = slp;
-      Serial.println(slp ? F("carnode: parked past sleep limit - repeat OFF until driving")
+      Serial.println(slp ? (at_home ? F("carnode: parked at home - repeat OFF until driving")
+                                    : F("carnode: parked past sleep limit - repeat OFF until driving"))
                          : F("carnode: repeat back ON"));
     }
 
     if (!cfg.enabled && !pending_send) return;
     if ((int32_t)(millis() - hold_until) < 0) return;          // duty-cycle / LBT hold
-
-    unsigned long now = millis();
-
-    // Median-filter the fix: everything below (park logic, dedup, and the
-    // position that gets broadcast) sees the median of the recent samples,
-    // so one teleporting fix can't fake movement or misplace the park pin.
-    Context fc = c;
-    fix_filtered = c.gps_valid && filterFix(now, c.lat, c.lon, fc.lat, fc.lon);
 
     // --- track movement -> detect the parked transition (needs a valid fix) ---
     // Movement must persist outside the radius for CAR_NODE_MOVE_CONFIRM_MS
@@ -742,7 +825,7 @@ public:
       if (!have_anchor) {
         anchor_lat = fc.lat; anchor_lon = fc.lon; stationary_since = now;
         have_anchor = true; park_reported = false; drive_state = 1;
-        outside_since = 0; last_dist_m = 0;
+        outside_since = 0; last_dist_m = 0; at_home = false;
       } else {
         double d = distMeters(anchor_lat, anchor_lon, fc.lat, fc.lon);
         last_dist_m = (int)(d + 0.5);
@@ -751,7 +834,7 @@ public:
           if ((unsigned long)(now - outside_since) >= CAR_NODE_MOVE_CONFIRM_MS) {
             anchor_lat = fc.lat; anchor_lon = fc.lon;          // moving: follow the vehicle
             stationary_since = now; park_reported = false; drive_state = 1;
-            outside_since = 0;
+            outside_since = 0; at_home = false;
           }
           // else: not confirmed yet — hold state, keep the stationary clock
         } else {
@@ -760,6 +843,13 @@ public:
             drive_state = 2;                                   // parked
             if (!park_reported) park_event = true;
           }
+          // Parked at home? Anchor vs stored home — both stable, so no flapping.
+          // Re-evaluated every tick so setting/clearing home while already
+          // parked takes effect immediately. NOT cleared on fix loss (garage):
+          // like the sleep, only actually driving away wakes the repeater.
+          at_home = cfg.have_home && drive_state == 2 &&
+                    distMeters(anchor_lat, anchor_lon, cfg.home_lat, cfg.home_lon)
+                      <= (double)cfg.home_radius_m;
         }
       }
     } else if (cfg.enabled) {
@@ -770,7 +860,8 @@ public:
     if (cfg.enabled && drive_state != state_announced) {
       state_announced = drive_state;
       Serial.print(F("carnode: "));
-      Serial.print(drive_state == 2 ? F("parked") : drive_state == 1 ? F("driving") : F("no fix"));
+      Serial.print(drive_state == 2 ? (at_home ? F("parked at home") : F("parked"))
+                   : drive_state == 1 ? F("driving") : F("no fix"));
       if (have_anchor && last_dist_m >= 0) {
         Serial.print(F(" (")); Serial.print(last_dist_m); Serial.print(F(" m from anchor)"));
       }
@@ -778,11 +869,18 @@ public:
     }
 
     // periodic presence timer (0 = park-only). First shot is one interval out.
+    // At home the presence is suppressed too — total radio silence, nothing
+    // places the home location (or even the node) on the air. Driving away
+    // clears at_home and the presence cadence resumes.
     if (cfg.enabled && cfg.interval_mins > 0 && next_presence == 0) scheduleNextPresence();
     bool presence_due = cfg.enabled && cfg.interval_mins > 0 && next_presence != 0 &&
-                        (int32_t)(now - next_presence) >= 0;
+                        !at_home && (int32_t)(now - next_presence) >= 0;
 
     bool manual = pending_send;
+    // Parked at home: swallow the park event — no Meshtastic burst, no MeshCore
+    // re-advert. An explicit 'carnode send' still transmits (operator override);
+    // the repeat-off side is repeatSuppressed() above.
+    if (park_event && at_home && !manual) { park_reported = true; park_event = false; }
     if (!manual && !park_event && !presence_due) return;
     if (busy) return;                                          // retune only when mesh idle
 

@@ -1365,7 +1365,12 @@ void MyMesh::loop() {
   // Mobile beacon: announce our LIVE GPS position on Meshtastic when the mesh
   // is idle, paced by movement. Restores the repeater's current radio params.
   {
-    bool busy = hasPendingWork() || radio_driver.isReceiving();
+    // isInRecvMode() is false while a MeshCore transmit is in flight (the packet
+    // has already been dequeued, so hasPendingWork() no longer sees it). Without
+    // this the beacon could retune the radio mid-transmit, aborting the send and
+    // leaving the radio in a state where the next CAD never completes.
+    bool busy = hasPendingWork() || radio_driver.isReceiving()
+             || !radio_driver.isInRecvMode();
     CarNodeControl::Context ctx;
     ctx.node_name = _prefs.node_name;
     // Live fix from the sensor manager's GPS, falling back to configured location.
@@ -1402,7 +1407,8 @@ void MyMesh::loop() {
       updateFloodAdvertTimer();            // push the next periodic flood advert out
     }
 
-    // Repeat sleep: parked past the limit -> toggle the actual repeat switch
+    // Repeat sleep: parked past the limit (or parked at home, which suppresses
+    // immediately) -> toggle the actual repeat switch
     // off (the same pref as 'set repeat on|off'), so forwarding, 'get repeat'
     // and remote status all agree. Waking (driving detected) restores repeat
     // only if it was on when the sleep tripped, so an operator's own

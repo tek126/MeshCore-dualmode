@@ -115,11 +115,14 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 
 | Command | Effect |
 | --- | --- |
-| `carnode` / `carnode status` | show drive state (nofix/driving/parked/sleeping) + park config |
+| `carnode` / `carnode status` | show drive state (nofix/driving/parked/sleeping/home) + park config |
 | `carnode park <sec>` | stopped time before an update fires (30–86400, default 300) |
 | `carnode radius <m>` | movement within this counts as "stopped" (5–2000, default 30) |
 | `carnode advertdelay <sec>` | gap from the Meshtastic burst to the MeshCore advert (0–600, default 10) |
 | `carnode sleep <hours>` | parked this long → stop repeating until driving again (0–720, 0 = never, default 20) |
+| `carnode home` | set home = the current spot; parking at home → repeat off immediately, radio quiet |
+| `carnode home clear` | forget the home location |
+| `carnode home radius <m>` | how close to home counts as home (5–2000, default 100) |
 
 **Park model.** The node watches its GPS fix. While the position keeps moving
 outside `radius` metres, it's *driving* and sends no location. Once the fix sits
@@ -167,9 +170,22 @@ Losing the GPS fix while parked (underground garage) does *not* wake it; only
 movement does. The sleep toggle is not persisted: a reboot starts awake, and
 `carnode sleep 0` disables the feature.
 
+**Home.** Park where the vehicle usually lives and say `carnode home` — the node
+stores the current (median-filtered) spot as *home*, persisted in `/carnode`.
+From then on, parking within `home radius` metres of it (default 100) turns
+**repeat off** immediately — no waiting for the `sleep` timer — on the logic that
+home already has fixed coverage and doesn't need a mobile repeater idling in the
+driveway. While at home the node also goes **radio-quiet**: the park burst, the
+MeshCore re-advert, *and* the periodic presence are all suppressed, so the home
+location is never put on the air (an explicit `carnode send` still transmits if
+you ask for it). Driving away restores repeat and the normal beacon behaviour,
+exactly like waking from sleep. Losing the fix at home (garage) keeps it home;
+only driving away clears it. `carnode home clear` forgets the location.
+
 Defaults: US LongFast, 5-min park / 30 m radius, 30-min presence, 22 dBm
-(region-capped), 20 h repeat sleep, disabled until `mtbeacon on`. The OLED home
-screen shows `CarNode driving` / `parked` / `sleeping`.
+(region-capped), 20 h repeat sleep, no home until set, disabled until
+`mtbeacon on`. The OLED home screen shows `CarNode driving` / `parked` /
+`sleeping` / `home`.
 
 ## Scope / etiquette
 
