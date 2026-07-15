@@ -190,6 +190,9 @@ void radioRestoreMeshCore(DriverT& driver, RadioT& radio,
   driver.setParams(home_freq, home_bw, home_sf, home_cr);   // also restores preamble
   radio.setSyncWord(home_sync);
   driver.setTxPower(home_tx_power);
+  driver.startRecv();   // re-arm RX now; otherwise the radio sits in standby until
+                        // the next recvRaw(), and under powersaving the node can
+                        // sleep first and stay deaf for a whole wake interval.
 }
 
 // Retune to Meshtastic, transmit one raw packet, restore the MeshCore PHY.
