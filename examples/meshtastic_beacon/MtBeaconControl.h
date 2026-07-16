@@ -322,6 +322,18 @@ public:
 
   bool enabled() const { return cfg.enabled; }
 
+  // The repeater just flooded a MeshCore advert: have the chat text ride a
+  // beacon burst shortly after, so the Meshtastic text follows the repeater's
+  // actual advert cadence instead of a boot-reset stopwatch (which, on nodes
+  // that reboot or hang before a full 47h period elapses, never fires at all).
+  // textDue() still paces extra texts between adverts when text_mult > 1.
+  void onFloodAdvert() {
+    if (!cfg.enabled || cfg.text_mult == 0) return;
+    pending_text = true;
+    unsigned long soon = millis() + 15000;      // let the advert TX clear the air first
+    if ((int32_t)(next_due - soon) > 0) next_due = soon;
+  }
+
   // Compact one-line status for the repeater's home screen, e.g.
   // "Beacon ON LongFast".
   void uiLine(char* out, size_t n) const {
@@ -335,11 +347,24 @@ public:
     int8_t ep = effectivePower();
     char fbuf[14] = {0};
     appendFreq(fbuf, cfg.freq);
-    char txt[22];
+    char txt[32];
     if (cfg.text_mult == 0) strcpy(txt, "txt:off");
     else if (flood_hours_seen == 0) snprintf(txt, sizeof(txt), "txt%dx(noadv)", (int)cfg.text_mult);
-    else snprintf(txt, sizeof(txt), "txt%dx~%dh", (int)cfg.text_mult,
-                  (int)(flood_hours_seen / cfg.text_mult));
+    else {
+      // live countdown to the next timer-paced text ("due now" = armed, rides
+      // the next burst). A flood-advert event can pull it in sooner.
+      char due[10];
+      unsigned long period = (unsigned long)flood_hours_seen * 3600000UL / cfg.text_mult;
+      unsigned long since = (unsigned long)(millis() - last_text_ms);
+      if (pending_text || since >= period) strcpy(due, "now");
+      else {
+        unsigned long left = (period - since) / 60000UL;   // minutes remaining
+        if (left >= 60) snprintf(due, sizeof(due), "%luh", left / 60);
+        else snprintf(due, sizeof(due), "%lum", left);
+      }
+      snprintf(txt, sizeof(txt), "txt%dx~%dh(due %s)", (int)cfg.text_mult,
+               (int)(flood_hours_seen / cfg.text_mult), due);
+    }
     // single bounded write -> shows the full text, never overflows reply[160]
     // "p<N>m" = presence cadence; "txt<N>x" = text N times per flood-advert period
     snprintf(reply, 160,

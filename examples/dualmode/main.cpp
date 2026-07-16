@@ -153,6 +153,13 @@ void setup() {
 }
 
 void loop() {
+  // Feed the hardware watchdog if one is running. The repeater arms it in
+  // rpt_setup(), and on nRF52 the WDT SURVIVES the mode-switch soft reset —
+  // without this, switching repeater -> companion would leave it running and
+  // unfed, resetting the node ~90s later. Feeding a stopped WDT is a no-op,
+  // and as a bonus a hung companion loop now self-recovers too.
+  NRF_WDT->RR[0] = WDT_RR_RR_Reload;
+
   mode_btn.update();
 
   if (g_mode == MODE_REPEATER) {

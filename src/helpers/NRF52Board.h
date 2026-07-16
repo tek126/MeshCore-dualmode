@@ -32,9 +32,9 @@ class NRF52Board : public mesh::MainBoard {
 protected:
   uint8_t startup_reason;
   char *ota_name;
+  uint32_t reset_reason;              // RESETREAS register value (captured on every board)
 
 #ifdef NRF52_POWER_MANAGEMENT
-  uint32_t reset_reason;              // RESETREAS register value
   uint8_t shutdown_reason;            // GPREGRET value (why we entered last SYSTEMOFF)
   uint16_t boot_voltage_mv;           // Battery voltage at boot (millivolts)
 
@@ -55,11 +55,20 @@ public:
   virtual void sleep(uint32_t secs) override;
   bool isExternalPowered() override;
 
+  // Reset-reason breadcrumb (all nRF52 boards): captured before SystemInit
+  // clears RESETREAS, printed at boot and queryable via 'get pwrmgt.bootreason'.
+  virtual uint32_t getResetReason() const override { return reset_reason; }
+  const char* getResetReasonString(uint32_t reason) override;
+
+  // Hardware watchdog: reboot instead of hanging forever if loop() ever stalls
+  // (e.g. a wedged radio wait). Once started it cannot be stopped; the UF2
+  // bootloader feeds a running WDT during DFU, so updates stay safe.
+  void startWatchdog(uint32_t secs);
+  void feedWatchdog();
+
 #ifdef NRF52_POWER_MANAGEMENT
   uint16_t getBootVoltage() override { return boot_voltage_mv; }
-  virtual uint32_t getResetReason() const override { return reset_reason; }
   uint8_t getShutdownReason() const override { return shutdown_reason; }
-  const char* getResetReasonString(uint32_t reason) override;
   const char* getShutdownReasonString(uint8_t reason) override;
 #endif
 };

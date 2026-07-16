@@ -918,7 +918,9 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
       _board->getResetReasonString(_board->getResetReason()),
       _board->getShutdownReasonString(_board->getShutdownReason()));
 #else
-    strcpy(reply, "ERROR: Power management not supported");
+    // reset reason is available on all nRF52 boards (others reply "Not available")
+    sprintf(reply, "> Reset: %s",
+      _board->getResetReasonString(_board->getResetReason()));
 #endif
   } else if (memcmp(config, "pwrmgt.bootmv", 13) == 0) {
 #ifdef NRF52_POWER_MANAGEMENT

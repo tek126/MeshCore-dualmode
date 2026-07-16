@@ -526,6 +526,22 @@ public:
 
   bool enabled() const { return cfg.enabled; }
 
+  // The repeater just flooded a MeshCore advert (periodic timer, CLI 'advert',
+  // or our own park re-advert): have the chat text ride a Meshtastic burst
+  // shortly after, so the text follows the real advert cadence instead of a
+  // boot-reset stopwatch (which, on a node that power-cycles with the ignition,
+  // never reaches a full 47h period and so never fires). textDue() still paces
+  // extra texts between adverts when text_mult > 1. At home nothing changes:
+  // presence stays suppressed, the text just stays pending until driving.
+  void onFloodAdvert() {
+    if (!cfg.enabled || cfg.text_mult == 0) return;
+    pending_text = true;
+    if (cfg.interval_mins > 0 && next_presence != 0) {   // pull the next presence close
+      unsigned long soon = millis() + 15000;             // let the advert TX clear the air
+      if ((int32_t)(next_presence - soon) > 0) next_presence = soon;
+    }
+  }
+
   // Hand a pending MeshCore re-advert to the repeater. Returns true once per
   // park event (clears the flag); the repeater then writes lat/lon into its
   // NodePrefs and floods a fresh advert.
@@ -576,11 +592,24 @@ public:
     int8_t ep = effectivePower();
     char fbuf[14] = {0};
     appendFreq(fbuf, cfg.freq);
-    char txt[22];
+    char txt[32];
     if (cfg.text_mult == 0) strcpy(txt, "txt:off");
     else if (flood_hours_seen == 0) snprintf(txt, sizeof(txt), "txt%dx(noadv)", (int)cfg.text_mult);
-    else snprintf(txt, sizeof(txt), "txt%dx~%dh", (int)cfg.text_mult,
-                  (int)(flood_hours_seen / cfg.text_mult));
+    else {
+      // live countdown to the next timer-paced text ("due now" = armed, rides
+      // the next burst). A flood-advert event can pull it in sooner.
+      char due[10];
+      unsigned long period = (unsigned long)flood_hours_seen * 3600000UL / cfg.text_mult;
+      unsigned long since = (unsigned long)(millis() - last_text_ms);
+      if (pending_text || since >= period) strcpy(due, "now");
+      else {
+        unsigned long left = (period - since) / 60000UL;   // minutes remaining
+        if (left >= 60) snprintf(due, sizeof(due), "%luh", left / 60);
+        else snprintf(due, sizeof(due), "%lum", left);
+      }
+      snprintf(txt, sizeof(txt), "txt%dx~%dh(due %s)", (int)cfg.text_mult,
+               (int)(flood_hours_seen / cfg.text_mult), due);
+    }
     char ivl[10];
     if (cfg.interval_mins == 0) strcpy(ivl, "i:park");
     else snprintf(ivl, sizeof(ivl), "i%dm", (int)cfg.interval_mins);
