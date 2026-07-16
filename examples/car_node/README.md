@@ -11,6 +11,10 @@ on-air-verified interop math (`MeshtasticProto.h` / `MeshtasticBeacon.h`)
 unchanged, and replaces the static, fixed-interval beacon with a park-triggered,
 GPS-driven one.
 
+**Get it:** prebuilt firmware + flashing instructions at
+[alexdowney.net/carnode](https://alexdowney.net/carnode/) · source on the
+[`carnode` branch](https://github.com/tek126/MeshCore-mtbeacon/tree/carnode).
+
 ## What's different from mtbeacon
 
 | | mtbeacon | car_node |
@@ -106,7 +110,7 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 | `mtbeacon freq <MHz\|auto>` | manual frequency override; `auto` re-derives |
 | `mtbeacon power <dBm>` | TX power (−9…22), capped to region limit |
 | `mtbeacon text <string>` | announced chat text (≤63 chars) |
-| `mtbeacon text.mult <N>` | post text N times per flood-advert period (0 = never) |
+| `mtbeacon text.mult <N>` | text pacing: rides each flood advert, plus N−1 timer-paced extras per period (0 = never) |
 | `mtbeacon nodeinfo on/off` | include NodeInfo (named node) — default on |
 | `mtbeacon position on/off` | include Position (live map pin) — default on |
 | `mtbeacon presets` / `mtbeacon regions` | list available values |
@@ -151,8 +155,17 @@ style) fires every `interval` minutes (default 30, `0` = park-only) so the node
 doesn't age out of Meshtastic node lists. While **parked** it includes Position —
 refreshing the pin at the parked spot; while **driving** (or without a fix) it
 sends NodeInfo only, so the map pin never wanders off to a random mid-drive point.
-Location still updates *only* at park time. The chat text also rides these
-presence cycles when due.
+Location still updates *only* at park time.
+
+**Chat text.** The `mtbeacon text` message is **event-driven**: whenever the
+repeater floods a MeshCore advert — the park re-advert, the periodic flood
+advert, or an explicit CLI `advert` — the text rides a Meshtastic burst a few
+seconds later. So each *new-spot* park announces itself in chat, and running
+`advert` doubles as a live test. (`text.mult > 1` adds timer-paced extras
+between adverts; `text.mult 0` disables the text entirely.) `mtbeacon status`
+shows the pacing live, e.g. `txt1x~47h(due 13h)` — or `(due now)` when a text
+is armed and waiting for the next burst. At home, nothing transmits; an armed
+text just stays pending until you drive away.
 
 > The MeshCore side relies on `advert_loc_policy = prefs` (the repeater default),
 > which this build keeps. The car node writes the fix into prefs itself rather
@@ -186,6 +199,23 @@ Defaults: US LongFast, 5-min park / 30 m radius, 30-min presence, 22 dBm
 (region-capped), 20 h repeat sleep, no home until set, disabled until
 `mtbeacon on`. The OLED home screen shows `CarNode driving` / `parked` /
 `sleeping` / `home`.
+
+## Reliability (nRF52 boards)
+
+On nRF52 builds (T114, T1000-E) the firmware arms the **hardware watchdog**
+(90 s, fed every loop pass): if the node ever hard-hangs, it reboots itself
+instead of riding around dead until someone power-cycles it. DFU updates are
+unaffected (the UF2 bootloader feeds a running watchdog), and the dual-mode
+build keeps feeding it across the repeater/companion mode switch.
+
+Every boot prints its **reset reason** to serial, and it's remotely queryable:
+
+```
+get pwrmgt.bootreason
+> Reset: Watchdog
+```
+
+`Watchdog` there means the node hung and rescued itself — worth a bug report.
 
 ## Scope / etiquette
 
