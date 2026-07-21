@@ -1439,9 +1439,14 @@ void MyMesh::loop() {
     // advert reads these prefs.) Persisted so it survives a reboot while parked.
     double rlat, rlon;
     if (_carnode.takeReadvert(rlat, rlon)) {
-      _prefs.node_lat = rlat;
-      _prefs.node_lon = rlon;
-      savePrefs();
+      // Only persist when the fix actually moved: a re-advert that failed to
+      // queue is handed back and retried, and rewriting identical prefs on each
+      // attempt would burn flash for nothing.
+      if (_prefs.node_lat != rlat || _prefs.node_lon != rlon) {
+        _prefs.node_lat = rlat;
+        _prefs.node_lon = rlon;
+        savePrefs();
+      }
       // Space the MeshCore advert after the Meshtastic burst so the two don't
       // land on top of each other (delay is the `carnode advertdelay` knob).
       if (sendParkReadvert((int)_carnode.advertDelayMs())) {
