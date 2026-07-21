@@ -233,6 +233,9 @@ public:
   void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) override;
   bool formatFileSystem() override;
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
+#ifdef WITH_CAR_NODE
+  bool sendParkReadvert(int delay_millis);
+#endif
   void updateAdvertTimer() override;
   void updateFloodAdvertTimer() override;
 

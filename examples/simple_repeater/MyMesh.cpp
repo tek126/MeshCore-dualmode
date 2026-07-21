@@ -1057,6 +1057,35 @@ void MyMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
   }
 }
 
+#ifdef WITH_CAR_NODE
+// The park re-advert, as a *checked* flood advert. Unlike sendSelfAdvertisement()
+// this reports whether the packet actually made it onto the send queue: both
+// createSelfAdvert() (packet pool exhausted) and queueOutbound() (send queue
+// full) fail silently, and a lost park re-advert is never retried on its own --
+// the park is already marked reported. The car node re-arms the handoff on false.
+//
+// The queue is checked by count because sendFlood() has no return value; it
+// queues exactly one packet, so a total that did not grow means it was dropped.
+bool MyMesh::sendParkReadvert(int delay_millis) {
+  mesh::Packet *pkt = createSelfAdvert();
+  if (!pkt) {
+    MESH_DEBUG_PRINTLN("carnode: no free packet for park re-advert");
+    return false;
+  }
+  int before = _mgr->getOutboundTotal();
+  sendFloodScoped(default_scope, pkt, delay_millis, _prefs.path_hash_mode + 1);
+  if (_mgr->getOutboundTotal() <= before) {
+    MESH_DEBUG_PRINTLN("carnode: park re-advert dropped, send queue full");
+    return false;
+  }
+  // Deliberately NOT pulling the presence in (see CarNodeControl::onFloodAdvert):
+  // the park burst just finished and this advert is still queued behind the
+  // advertdelay, so a second retune 15 s out would land on top of it.
+  _carnode.onFloodAdvert(false);
+  return true;
+}
+#endif
+
 void MyMesh::updateAdvertTimer() {
   if (_prefs.advert_interval > 0) { // schedule local advert timer
     next_local_advert = futureMillis(((uint32_t)_prefs.advert_interval) * 2 * 60 * 1000);
@@ -1415,8 +1444,16 @@ void MyMesh::loop() {
       savePrefs();
       // Space the MeshCore advert after the Meshtastic burst so the two don't
       // land on top of each other (delay is the `carnode advertdelay` knob).
-      sendSelfAdvertisement((int)_carnode.advertDelayMs(), true);  // flood re-advert with parked location
-      updateFloodAdvertTimer();            // push the next periodic flood advert out
+      if (sendParkReadvert((int)_carnode.advertDelayMs())) {
+        _carnode.readvertQueued();
+        updateFloodAdvertTimer();          // push the next periodic flood advert out
+      } else {
+        // Could not queue it. Hand it back for a retry, and leave the periodic
+        // flood-advert timer ALONE: if the retries also fail, the next scheduled
+        // advert carries the location (already saved above) instead of slipping
+        // a full flood_advert_interval.
+        _carnode.readvertFailed();
+      }
     }
 
     // Repeat sleep: parked past the limit (or parked at home, which suppresses

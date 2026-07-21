@@ -78,6 +78,18 @@
   #define CAR_NODE_FIX_STALE_MS 60000UL
 #endif
 
+// The MeshCore park re-advert is handed to the repeater, which can fail to
+// queue it (packet pool or send queue exhausted while forwarding a burst).
+// That is silent and unrecoverable — the park is already marked reported, so
+// nothing retries and the mesh never learns where we stopped. Re-arm the
+// handoff instead, with a linear backoff, for this many attempts.
+#ifndef CAR_NODE_READVERT_MAX_TRIES
+  #define CAR_NODE_READVERT_MAX_TRIES 5
+#endif
+#ifndef CAR_NODE_READVERT_RETRY_MS
+  #define CAR_NODE_READVERT_RETRY_MS 5000UL
+#endif
+
 class CarNodeControl {
 public:
   struct Config {
@@ -198,6 +210,9 @@ private:
   bool     have_advert = false;
   bool     readvert_pending = false;        // a MeshCore re-advert is waiting for MyMesh
   double   readvert_lat = 0, readvert_lon = 0;
+  unsigned long readvert_retry_at = 0;      // backoff before handing the re-advert over again
+  uint8_t  readvert_tries = 0;              // failed attempts at queueing the re-advert
+  uint8_t  readvert_drops = 0;              // re-adverts abandoned after MAX_TRIES (status)
 
   // Equirectangular small-distance approximation (metres). Good to <0.5% over
   // the tens-to-hundreds of metres that matter here.
@@ -533,10 +548,17 @@ public:
   // never reaches a full 47h period and so never fires). textDue() still paces
   // extra texts between adverts when text_mult > 1. At home nothing changes:
   // presence stays suppressed, the text just stays pending until driving.
-  void onFloodAdvert() {
+  //
+  // pull_presence=false is for our OWN park re-advert: the park burst has just
+  // finished (and already carried the text if it was due), and the advert is
+  // sitting in the send queue behind `advertdelay`. Scheduling another
+  // Meshtastic burst 15 s out would put a second off-channel retune right on
+  // top of the advert we are trying to get out. Arm the text so it still rides
+  // a real advert, but let it wait for the next scheduled presence.
+  void onFloodAdvert(bool pull_presence = true) {
     if (!cfg.enabled || cfg.text_mult == 0) return;
     pending_text = true;
-    if (cfg.interval_mins > 0 && next_presence != 0) {   // pull the next presence close
+    if (pull_presence && cfg.interval_mins > 0 && next_presence != 0) {
       unsigned long soon = millis() + 15000;             // let the advert TX clear the air
       if ((int32_t)(next_presence - soon) > 0) next_presence = soon;
     }
@@ -544,14 +566,36 @@ public:
 
   // Hand a pending MeshCore re-advert to the repeater. Returns true once per
   // park event (clears the flag); the repeater then writes lat/lon into its
-  // NodePrefs and floods a fresh advert.
+  // NodePrefs and floods a fresh advert. If that flood cannot be queued the
+  // repeater calls readvertFailed() and we hand it back after a backoff --
+  // without this the park is announced on Meshtastic and never on MeshCore.
   bool takeReadvert(double& lat, double& lon) {
     if (!readvert_pending) return false;
+    if (readvert_retry_at != 0 && (int32_t)(millis() - readvert_retry_at) < 0) return false;
     readvert_pending = false;
     lat = readvert_lat;
     lon = readvert_lon;
     return true;
   }
+
+  // The repeater could not queue the flood advert (no free packet, or the send
+  // queue was full). Re-arm the handoff with a linear backoff so it rides out a
+  // transient burst of forwarding. After MAX_TRIES we give up and let the next
+  // periodic flood advert carry the location -- it is already in NodePrefs.
+  void readvertFailed() {
+    if (++readvert_tries >= CAR_NODE_READVERT_MAX_TRIES) {
+      if (readvert_drops < 255) readvert_drops++;
+      readvert_tries = 0;
+      readvert_retry_at = 0;
+      Serial.println(F("carnode: park re-advert dropped - mesh queue full, giving up"));
+      return;
+    }
+    readvert_pending = true;
+    readvert_retry_at = millis() + CAR_NODE_READVERT_RETRY_MS * readvert_tries;
+  }
+
+  // The flood advert made it onto the send queue.
+  void readvertQueued() { readvert_tries = 0; readvert_retry_at = 0; }
 
   // How long the repeater should delay the MeshCore advert after the Meshtastic
   // burst (ms), so the two park transmissions don't land on top of each other.
@@ -641,11 +685,15 @@ public:
     char hm[10];
     if (!cfg.have_home) strcpy(hm, "hm:off");
     else snprintf(hm, sizeof(hm), "hm%dm", (int)cfg.home_radius_m);
+    // "adv!N" = N park re-adverts the mesh could not queue (see readvertFailed);
+    // omitted entirely when zero, which is the normal case.
+    char drops[12] = {0};
+    if (readvert_drops) snprintf(drops, sizeof(drops), " adv!%d", (int)readvert_drops);
     snprintf(reply, 160,
-             "carnode %s [%s%s] park%ds r%dm adv%ds %s %s loc:%s !%08lx",
+             "carnode %s [%s%s] park%ds r%dm adv%ds %s %s loc:%s%s !%08lx",
              cfg.enabled ? "ON" : "off", st, trk,
              (int)cfg.park_secs, (int)cfg.stop_radius_m, (int)cfg.advert_delay_s,
-             slp, hm, have_advert ? "set" : "none", (unsigned long)node_num);
+             slp, hm, have_advert ? "set" : "none", drops, (unsigned long)node_num);
   }
 
   // If `command` is `<verb>` (optionally followed by args), return a pointer to
@@ -937,6 +985,7 @@ public:
       //    update together. (Skipped if we have no location to share.)
       if (fc.gps_valid) {
         readvert_lat = fc.lat; readvert_lon = fc.lon; readvert_pending = true;
+        readvert_tries = 0; readvert_retry_at = 0;   // fresh fix supersedes any retry
         advert_lat = fc.lat; advert_lon = fc.lon; have_advert = true;
       }
     } else {
