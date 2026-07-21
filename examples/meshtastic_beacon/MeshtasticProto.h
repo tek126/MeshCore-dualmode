@@ -155,6 +155,27 @@ inline int buildUserPayload(uint8_t* out, uint32_t node_num,
   return n;
 }
 
+// Default Meshtastic short_name for a beacon: "MC" + the low byte of the node
+// number in hex, e.g. "MC7a". short_name is capped at 4 characters and is what
+// Meshtastic renders as the MAP MARKER LABEL, so a constant "MC" would make
+// every beacon an indistinguishable pin; the two hex digits keep 256-way local
+// uniqueness while still reading as MeshCore at a glance. The long name
+// ("MC <node name>") disambiguates on tap.
+inline void defaultShortName(char out[5], uint32_t node_num) {
+  snprintf(out, 5, "MC%02x", (unsigned)(node_num & 0xFFu));
+}
+
+// Copy an operator-set short name into out[5], truncated to Meshtastic's 4-char
+// limit; falls back to defaultShortName() when unset (empty string = "auto").
+inline void resolveShortName(char out[5], const char* configured, uint32_t node_num) {
+  if (configured && configured[0]) {
+    strncpy(out, configured, 4);
+    out[4] = 0;
+  } else {
+    defaultShortName(out, node_num);
+  }
+}
+
 // Meshtastic Position message: latitude_i, longitude_i (1e-7 deg), time, precision.
 // NOTE: Position.time is fixed32 (wire type 5) in mesh.proto, NOT a varint — a
 // varint here makes nanopb reject the whole message, so the pin never shows.

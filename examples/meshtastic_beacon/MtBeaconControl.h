@@ -13,6 +13,7 @@
 #include <Arduino.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>   // offsetof (config migration)
 #include "MeshtasticBeacon.h"
 
 // RadioLib's 1-byte private LoRa sync word (0x12) — what MeshCore uses on its
@@ -54,6 +55,10 @@ public:
     uint8_t  cr;
     uint8_t  sync_word;
     uint16_t preamble;
+    // v6: Meshtastic short_name (map marker label), "" = auto ("MC" + 2 hex).
+    // Fields are only ever APPENDED here, so the older prefix layout stays
+    // byte-identical and load() can migrate an MTB5 file in place.
+    char     short_name[5];
   };
 
   // Live per-send context the repeater supplies each tick (name/location/clock
@@ -69,7 +74,8 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC = 0x3542544DUL;  // 'MTB5' (bumped: added hop_limit)
+  static const uint32_t MAGIC    = 0x3642544DUL;  // 'MTB6' (bumped: added short_name)
+  static const uint32_t MAGIC_V5 = 0x3542544DUL;  // 'MTB5' (+hop_limit; migrated on load)
 
   Config cfg;
   uint32_t node_num = 0;
@@ -104,6 +110,7 @@ private:
     cfg.freq_override = 0.0f;  // auto
     cfg.tx_power = 22;
     cfg.interval_mins = 30;    // presence cadence: frequent enough to stay live
+    cfg.short_name[0] = 0;     // auto: "MC" + 2 hex of the node number
     strncpy(cfg.text, "MeshCore repeater in range", sizeof(cfg.text) - 1);
     recompute();
   }
@@ -128,6 +135,7 @@ private:
     cfg.interval_mins = constrain(cfg.interval_mins, 1, 1440);
     cfg.enabled = cfg.enabled ? 1 : 0;
     if (cfg.hop_limit > 3) cfg.hop_limit = 3;   // Meshtastic hop limit cap
+    cfg.short_name[sizeof(cfg.short_name) - 1] = 0;
     cfg.text[sizeof(cfg.text) - 1] = 0;
     recompute();   // re-derive in case the preset/region tables changed
   }
@@ -153,6 +161,7 @@ private:
     Serial.println(F("  power <dBm>        TX power, -9..22 (capped to region limit)"));
     Serial.println(F("  hops <0-3>         Meshtastic hop limit for presence + text (default 0)"));
     Serial.println(F("  text <string>      the chat-message content (<=63 chars)"));
+    Serial.println(F("  short <str|auto>   Meshtastic short name / map label, <=4 chars"));
     Serial.println(F("  nodeinfo on|off    include NodeInfo (named node 'MC <name>')"));
     Serial.println(F("  position on|off    include Position (map pin) if location set"));
     Serial.println(F("  presets / regions  list available values"));
@@ -223,7 +232,7 @@ private:
       if (!cfg.send_nodeinfo) return 0;
       char ln[44], sn[5];
       snprintf(ln, sizeof(ln), "MC %s", (c.node_name && *c.node_name) ? c.node_name : "Repeater");
-      snprintf(sn, sizeof(sn), "%04lx", (unsigned long)(node_num & 0xFFFF));
+      meshtastic::resolveShortName(sn, cfg.short_name, node_num);
       int n = meshtastic::buildUserPayload(pl, node_num, ln, sn, MT_HW_MODEL);
       return meshtastic::buildDataPacket(pkt, cap, node_num, nextId(),
                 meshtastic::PORT_NODEINFO, pl, n, key, klen, chan_hash, cfg.hop_limit);
@@ -239,7 +248,8 @@ private:
 
   // One retune: emit the silent presence (NodeInfo + Position) plus the chat
   // text if it's due (pending_text), then restore the MeshCore PHY. Returns
-  // false if skipped (channel busy).
+  // false if the channel was busy (LBT) or nothing left the antenna -- either
+  // way the caller retries.
   template <class D, class R>
   bool sendBurst(D& driver, R& radio, const Context& c) {
     meshtastic::ModemPreset mt = { cfg.freq, cfg.bw, cfg.sf, cfg.cr, cfg.preamble, cfg.sync_word };
@@ -263,15 +273,30 @@ private:
     uint8_t pkt[256];
     uint32_t air = 0;
     bool first = true;
+    int sent = 0, tried = 0, irq_misses = 0, lost = 0;
     for (int i = 0; i < nk; i++) {
       int len = buildKind(kinds[i], pkt, sizeof(pkt), c);
       if (len <= 0) continue;                          // disabled / unavailable
       if (!first) delay(120);                          // inter-packet gap
-      meshtastic::radioSendBlocking(driver, pkt, len);
+      meshtastic::TxOutcome r = meshtastic::radioSendChecked(driver, radio, pkt, len);
+      if (r == meshtastic::TX_NOT_STARTED) break;      // radio wouldn't start: abort burst
+      tried++;
+      if (meshtastic::txUsedFallback(r)) irq_misses++;
       air += driver.getEstAirtimeFor(len);
       first = false;
+      if (!meshtastic::txDelivered(r)) { lost++; continue; }   // chip says it never went out
+      sent++;
       if (kinds[i] == 2) { pending_text = false; last_text_ms = millis(); }  // text delivered
     }
+    // Diagnostics. A missed TxDone interrupt no longer means the packet is lost:
+    // we ask the chip's own TxDone flag, so "IRQ missed" and "never transmitted"
+    // are now separate reports instead of one guess.
+    if (irq_misses)
+      Serial.printf("beacon: TxDone IRQ missed on %d/%d packet(s) - checked the chip instead\n",
+                    irq_misses, tried);
+    if (lost)
+      Serial.printf("beacon: %d/%d packet(s) did NOT transmit (chip reports no TxDone)\n",
+                    lost, tried);
 
     meshtastic::radioRestoreMeshCore(driver, radio, c.home_freq, c.home_bw,
                 c.home_sf, c.home_cr, c.home_sync, c.home_tx_power);
@@ -280,7 +305,7 @@ private:
     uint8_t duty = meshtastic::REGIONS[cfg.region_idx].duty_pct;
     if (duty > 0 && duty < 100)
       duty_block_until = millis() + (unsigned long)air * (100 - duty) / duty;
-    return true;
+    return sent > 0;   // nothing left the antenna -> let the caller retry
   }
 
 public:
@@ -291,12 +316,24 @@ public:
     File f = fs->open(MT_BEACON_FILE);
 #endif
     if (f) {
-      Config tmp;
-      memset(&tmp, 0, sizeof(tmp));
-      int n = f.read((uint8_t*)&tmp, sizeof(tmp));
+      uint8_t buf[sizeof(Config)];
+      memset(buf, 0, sizeof(buf));
+      int n = f.read(buf, sizeof(buf));
       f.close();
-      if (n == (int)sizeof(tmp) && tmp.magic == MAGIC) {
-        cfg = tmp;
+      uint32_t magic = 0;
+      if (n >= 4) memcpy(&magic, buf, sizeof(magic));
+      if (n == (int)sizeof(Config) && magic == MAGIC) {
+        memcpy(&cfg, buf, sizeof(cfg));
+        sanitize();
+      } else if (magic == MAGIC_V5 && n >= (int)offsetof(Config, short_name) &&
+                 n <= (int)sizeof(Config)) {
+        // Fields are only ever appended, so an MTB5 file's prefix is exactly
+        // this struct's prefix — copy what it has, then force defaults for the
+        // fields MTB5 didn't have (the copy can land in its trailing padding).
+        // Every existing setting (preset, region, power, text, hops, ...) is kept.
+        memcpy(&cfg, buf, n);
+        cfg.magic = MAGIC;
+        cfg.short_name[0] = 0;   // MTB5 had no short name -> auto
         sanitize();
       }
     }
@@ -369,15 +406,18 @@ public:
       snprintf(txt, sizeof(txt), "txt%dx~%dh(due %s)", (int)cfg.text_mult,
                (int)(flood_hours_seen / cfg.text_mult), due);
     }
+    char sn[5];
+    meshtastic::resolveShortName(sn, cfg.short_name, node_num);
     // single bounded write -> shows the full text, never overflows reply[160]
     // "p<N>m" = presence cadence; "txt<N>x" = text N times per flood-advert period
+    // "!<id>/<short>" = Meshtastic node id and the short name / map label
     snprintf(reply, 160,
-             "beacon %s %sMHz%s %s %s(SF%d BW%d) p%dm %ddBm%s h%d %s%s %s !%08lx \"%s\"",
+             "beacon %s %sMHz%s %s %s(SF%d BW%d) p%dm %ddBm%s h%d %s%s %s !%08lx/%s \"%s\"",
              cfg.enabled ? "ON" : "off", fbuf, cfg.freq_override > 0.0f ? "*" : "",
              r.name, p.name, (int)cfg.sf, (int)cfg.bw, (int)cfg.interval_mins,
              (int)ep, ep < cfg.tx_power ? "(cap)" : "", (int)cfg.hop_limit,
              cfg.send_nodeinfo ? "+info" : "", cfg.send_position ? "+pos" : "",
-             txt, (unsigned long)node_num, cfg.text);
+             txt, (unsigned long)node_num, sn, cfg.text);
   }
 
   // Returns false if `command` is not an "mtbeacon" verb (caller falls through).
@@ -390,7 +430,7 @@ public:
       status(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printHelp();
-      strcpy(reply, "cmds: status on off send | interval text.mult text freq power hops preset region nodeinfo position | presets regions help");
+      strcpy(reply, "cmds: status on off send | interval text.mult text short freq power hops preset region nodeinfo position | presets regions help");
     } else if (memcmp(a, "nodeinfo ", 9) == 0) {
       cfg.send_nodeinfo = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - nodeinfo %s", cfg.send_nodeinfo ? "on" : "off");
@@ -462,6 +502,18 @@ public:
       else { cfg.text_mult = n; save(fs);
              if (n == 0) strcpy(reply, "OK - text off (silent presence only)");
              else sprintf(reply, "OK - text %dx per flood advert", n); }
+    } else if (memcmp(a, "short ", 6) == 0) {
+      const char* arg = a + 6;
+      char sn[5];
+      if (*arg == 0 || strcasecmp(arg, "auto") == 0) {
+        cfg.short_name[0] = 0;                        // auto: "MC" + 2 hex
+      } else {
+        strncpy(cfg.short_name, arg, sizeof(cfg.short_name) - 1);
+        cfg.short_name[sizeof(cfg.short_name) - 1] = 0;
+      }
+      save(fs);
+      meshtastic::resolveShortName(sn, cfg.short_name, node_num);
+      sprintf(reply, "OK - short name \"%s\"%s", sn, cfg.short_name[0] ? "" : " (auto)");
     } else if (memcmp(a, "text ", 5) == 0) {
       strncpy(cfg.text, a + 5, sizeof(cfg.text) - 1);
       cfg.text[sizeof(cfg.text) - 1] = 0;

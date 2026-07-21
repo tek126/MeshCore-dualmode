@@ -112,16 +112,24 @@ Then, over serial or via an admin remote-CLI session, use the `mtbeacon` verbs:
 | `mtbeacon hops <0-3>` | Meshtastic hop limit for presence + text (**default 0**) |
 | `mtbeacon text <string>` | set the announced text (≤63 chars) |
 | `mtbeacon text.mult <N>` | text pacing: rides each flood advert, plus N−1 timer-paced extras per period (0 = never) |
+| `mtbeacon short <str\|auto>` | Meshtastic short name / map label (≤4 chars); `auto` = `MC` + 2 hex |
 | `mtbeacon nodeinfo on/off` | also emit a NodeInfo (named node) — default on |
 | `mtbeacon position on/off` | also emit a Position (map pin) — default on |
 | `mtbeacon presets` / `mtbeacon regions` | list available preset / region names |
 
 **Shows up as a node on the Meshtastic map.** The periodic beacon is a silent
 *presence*: a **NodeInfo** (so the repeater appears as a named node — long name
-`MC <repeater name>`, short name = last 4 of the node id) and a **Position**
-(a map pin, using the repeater's configured lat/lon; skipped if unset). At slow
-presets the two alternate, one per cycle, to bound the off-channel window.
-Toggle them with `nodeinfo`/`position`.
+`MC <repeater name>`, short name `MC` + 2 hex of the node id, e.g. `MC7a`) and a
+**Position** (a map pin, using the repeater's configured lat/lon; skipped if
+unset). At slow presets the two alternate, one per cycle, to bound the
+off-channel window. Toggle them with `nodeinfo`/`position`.
+
+The **short name is the label Meshtastic draws on the map marker**, which is why
+it isn't a flat `MC` — that would make every beacon an indistinguishable pin.
+The 2 hex digits give 256-way local uniqueness while still reading as MeshCore
+at a glance; the long name disambiguates on tap. Operators with a callsign or
+site code can pin their own with `mtbeacon short <str>` (≤4 chars), or return to
+the derived one with `mtbeacon short auto`.
 
 **Chat text.** The `text` message is deliberately rarer than the presence, and
 it's **event-driven**: whenever the repeater floods a MeshCore advert — the
@@ -166,7 +174,38 @@ power-saving nodes don't sleep deaf. To add it to another board, copy the
 `*_repeater_mtbeacon` env shape: extend that board's repeater env and add
 `-D WITH_MT_BEACON -I examples/meshtastic_beacon`.
 
-## Reliability (nRF52 boards)
+## Reliability
+
+Each burst retunes the radio to the Meshtastic PHY and back. Completion of a
+transmit is normally signalled by the radio's **TxDone interrupt** — but that
+edge can occasionally be lost across a retune, even though the packet went out
+perfectly well. Rather than sit on a fixed multi-second timeout (which freezes
+the whole main loop while the node looks dead), the send is bounded by the
+packet's **estimated airtime**: once that has elapsed, a transmit that started
+has physically finished. Normal sends are unaffected — the interrupt arrives
+first and the wait ends immediately.
+
+When the interrupt *doesn't* arrive, the beacon **asks the radio chip directly**
+whether it transmitted (v0.2.5). MeshCore's `isSendComplete()` only reads a flag
+an ISR sets, so from there "sent, interrupt lost" and "never transmitted" are
+indistinguishable — v0.2.4 assumed the former and so could report a genuine
+failure as a success. RadioLib maps every family's TxDone bit onto one generic
+flag, so a single register read settles it on SX126x, SX127x, LR11x0 and
+STM32WLx alike. The read happens *before* `finishTransmit()`, which clears the
+flags.
+
+The two conditions are now reported separately, so a misbehaving ISR and a real
+transmit failure no longer look the same:
+
+```
+beacon: TxDone IRQ missed on 1/2 packet(s) - checked the chip instead
+beacon: 1/2 packet(s) did NOT transmit (chip reports no TxDone)
+```
+
+A burst reports failure only when nothing left the antenna — the caller then
+retries it rather than recording a delivery that never happened.
+
+### nRF52 boards
 
 nRF52 builds (RAK4631, ProMicro/Faketec, T114, T1000-E, XIAO nRF52, …) arm the
 **hardware watchdog** (90 s, fed every loop pass): if the node ever hard-hangs,

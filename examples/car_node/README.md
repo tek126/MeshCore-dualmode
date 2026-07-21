@@ -112,6 +112,7 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 | `mtbeacon hops <0-3>` | Meshtastic hop limit for presence + text (default 0 = direct neighbors only) |
 | `mtbeacon text <string>` | announced chat text (≤63 chars) |
 | `mtbeacon text.mult <N>` | text pacing: rides each flood advert, plus N−1 timer-paced extras per period (0 = never) |
+| `mtbeacon short <str\|auto>` | Meshtastic short name / map label (≤4 chars); `auto` = `MC` + 2 hex |
 | `mtbeacon nodeinfo on/off` | include NodeInfo (named node) — default on |
 | `mtbeacon position on/off` | include Position (live map pin) — default on |
 | `mtbeacon presets` / `mtbeacon regions` | list available values |
@@ -180,6 +181,29 @@ direct neighbors, never rebroadcast. A car node is mobile and transmits from
 wherever it parks, so rebroadcasting its position across someone else's mesh is
 poor manners; `mtbeacon hops <0-3>` raises it if you specifically need the
 reach. (Matches the base beacon's default since mtbeacon v0.2.0.)
+
+**Map label.** Meshtastic draws a node's **short name** on the map marker. The
+car node's defaults to `MC` + 2 hex of its node id (e.g. `MC7a`) — recognisable
+as MeshCore at a glance, while staying distinct from other nearby beacons. Set
+your own with `mtbeacon short <str>` (≤4 chars, e.g. a callsign) or go back with
+`mtbeacon short auto`. The long name stays `MC <node name>`.
+(mtbeacon v0.2.5 parity.)
+
+**Transmit confirmation.** Every burst retunes the radio to the Meshtastic PHY
+and back, and the TxDone interrupt that signals "transmit finished" can be lost
+across that retune. The wait is bounded by the packet's estimated airtime so a
+lost interrupt can never freeze the loop; if the interrupt doesn't arrive, the
+node then reads the **radio chip's own TxDone flag** to determine whether the
+packet actually went out, rather than assuming it did. A park burst that truly
+didn't transmit is reported as a failure and retried, and an undelivered chat
+text stays pending instead of being marked sent:
+
+```
+carnode: TxDone IRQ missed on 1/3 packet(s) - checked the chip instead
+carnode: 1/3 packet(s) did NOT transmit (chip reports no TxDone)
+```
+
+(mtbeacon v0.2.4 bounded the wait; v0.2.5 added the hardware check.)
 
 > The MeshCore side relies on `advert_loc_policy = prefs` (the repeater default),
 > which this build keeps. The car node writes the fix into prefs itself rather

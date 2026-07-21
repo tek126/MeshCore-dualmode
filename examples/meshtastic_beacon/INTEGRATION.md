@@ -67,6 +67,27 @@ listen-before-talk (bounded CAD — it never calls RadioLib's blocking
 retune/transmit/restore cycle, and an unconditional `startRecv()` after
 restore so a power-saving node can't sleep with the radio in standby.
 
+The transmit wait is bounded the same way (v0.2.4): `radioSendChecked()`
+normally ends on the TxDone interrupt, but caps the wait at the packet's
+estimated airtime x2 + 500 ms, since past that a transmit that started has
+physically finished — so a lost interrupt no longer stalls the loop for seconds.
+
+When the interrupt is missed it then reads the chip's own TxDone flag via
+RadioLib's family-agnostic `checkIrq(RADIOLIB_IRQ_TX_DONE)` (v0.2.5) and
+returns a `TxOutcome` saying which happened:
+
+| outcome | meaning |
+|---|---|
+| `TX_IRQ` | normal — the interrupt arrived |
+| `TX_HW_CONFIRMED` | interrupt missed, chip confirms it transmitted |
+| `TX_HW_FAILED` | interrupt missed, chip says it never transmitted |
+| `TX_PRESUMED` | interrupt missed, chip can't report — airtime bound only |
+| `TX_NOT_STARTED` | `startSendRaw()` refused |
+
+Use `txDelivered(r)` for the did-it-go-out question and `txUsedFallback(r)` for
+the ISR-health one. The register read must precede `onSendFinished()`, whose
+`finishTransmit()` clears the IRQ flags.
+
 ### 5. Flood-advert events — the chat text pacing (v0.2.3)
 
 Both places the repeater floods a MeshCore advert notify the beacon, so the

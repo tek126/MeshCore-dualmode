@@ -82,6 +82,21 @@ int main() {
   int un2 = buildUserPayload(u2, 0x12abcdef, "MC R", "abcd", 9 /*RAK4631*/);
   CHECK(u2[un2 - 2] == 0x28 && u2[un2 - 1] == 0x09);   // field5 hw_model=9
 
+  printf("short name (map marker label, 4 chars max):\n");
+  char sn[5];
+  defaultShortName(sn, 0x12abcdef);
+  CHECK(strcmp(sn, "MCef") == 0);                       // "MC" + low byte, hex
+  defaultShortName(sn, 0x00000007);
+  CHECK(strcmp(sn, "MC07") == 0);                       // zero-padded
+  resolveShortName(sn, "", 0x12abcdef);
+  CHECK(strcmp(sn, "MCef") == 0);                       // empty config = auto
+  resolveShortName(sn, nullptr, 0x12abcdef);
+  CHECK(strcmp(sn, "MCef") == 0);
+  resolveShortName(sn, "KC2K", 0x12abcdef);
+  CHECK(strcmp(sn, "KC2K") == 0);                       // operator override wins
+  resolveShortName(sn, "TOOLONG", 0x12abcdef);
+  CHECK(strcmp(sn, "TOOL") == 0);                       // truncated to 4, terminated
+
   printf(failures ? "\nFAILED: %d check(s)\n" : "\nAll checks passed.\n", failures);
   return failures ? 1 : 0;
 }

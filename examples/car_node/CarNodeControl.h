@@ -124,6 +124,9 @@ public:
     // v7: Meshtastic hop limit (mtbeacon v0.2.0 parity). Appended, so the
     // v5/v6 -> v7 load migrations keep everything above.
     uint8_t  hop_limit;      // hop limit for presence + text (0-3, default 0)
+    // v8: Meshtastic short_name / map marker label (mtbeacon v0.2.5 parity).
+    // "" = auto ("MC" + 2 hex of the node id). Appended, as always.
+    char     short_name[5];
   };
 
   // Live per-tick context the repeater supplies. lat/lon are the CURRENT GPS fix
@@ -140,7 +143,8 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC    = 0x374E5241UL;  // 'ARN7' — car-node config v7 (+hop_limit)
+  static const uint32_t MAGIC    = 0x384E5241UL;  // 'ARN8' — car-node config v8 (+short_name)
+  static const uint32_t MAGIC_V7 = 0x374E5241UL;  // 'ARN7' — v7 (+hop_limit; migrated on load)
   static const uint32_t MAGIC_V6 = 0x364E5241UL;  // 'ARN6' — v6 (+home; migrated on load)
   static const uint32_t MAGIC_V5 = 0x354E5241UL;  // 'ARN5' — v5 (migrated on load)
 
@@ -256,6 +260,7 @@ private:
     cfg.interval_mins = 30;    // presence cadence between parks (like base mtbeacon)
     cfg.have_home = 0;         // no home until 'carnode home' captures one
     cfg.home_radius_m = 100;   // generous: home is "the driveway", not a parking spot
+    cfg.short_name[0] = 0;     // auto: "MC" + 2 hex of the node number
     strncpy(cfg.text, "MeshCore mobile node", sizeof(cfg.text) - 1);
     recompute();
   }
@@ -286,6 +291,7 @@ private:
     cfg.enabled = cfg.enabled ? 1 : 0;
     cfg.have_home = cfg.have_home ? 1 : 0;
     if (cfg.hop_limit > 3) cfg.hop_limit = 3;   // Meshtastic hop limit cap
+    cfg.short_name[sizeof(cfg.short_name) - 1] = 0;
     cfg.text[sizeof(cfg.text) - 1] = 0;
     recompute();   // re-derive in case the preset/region tables changed
   }
@@ -306,6 +312,7 @@ private:
     Serial.println(F("  hops <0-3>         Meshtastic hop limit for presence + text (default 0)"));
     Serial.println(F("  text <string>      the chat-message content (<=63 chars)"));
     Serial.println(F("  text.mult <N>      chat text N times per flood-advert period (0=never)"));
+    Serial.println(F("  short <str|auto>   Meshtastic short name / map label, <=4 chars"));
     Serial.println(F("  nodeinfo on|off    include NodeInfo (named node 'MC <name>')"));
     Serial.println(F("  position on|off    include Position (map pin) from live GPS"));
     Serial.println(F("  presets / regions  list available values"));
@@ -388,7 +395,7 @@ private:
       if (!cfg.send_nodeinfo) return 0;
       char ln[44], sn[5];
       snprintf(ln, sizeof(ln), "MC %s", (c.node_name && *c.node_name) ? c.node_name : "Mobile");
-      snprintf(sn, sizeof(sn), "%04lx", (unsigned long)(node_num & 0xFFFF));
+      meshtastic::resolveShortName(sn, cfg.short_name, node_num);
       int n = meshtastic::buildUserPayload(pl, node_num, ln, sn, MT_HW_MODEL);
       return meshtastic::buildDataPacket(pkt, cap, node_num, nextId(),
                 meshtastic::PORT_NODEINFO, pl, n, key, klen, chan_hash, cfg.hop_limit);
@@ -427,23 +434,30 @@ private:
     uint8_t pkt[256];
     uint32_t air = 0;
     bool first = true;
-    int sent = 0, irq_misses = 0;
+    int sent = 0, tried = 0, irq_misses = 0, lost = 0;
     for (int i = 0; i < nk; i++) {
       int len = buildKind(kinds[i], pkt, sizeof(pkt), c);
       if (len <= 0) continue;                          // disabled / unavailable
       if (!first) delay(120);                          // inter-packet gap
-      bool miss = false;
-      if (!meshtastic::radioSendBlocking(driver, pkt, len, &miss)) break;  // radio wouldn't start: abort burst
-      sent++; if (miss) irq_misses++;
+      meshtastic::TxOutcome r = meshtastic::radioSendChecked(driver, radio, pkt, len);
+      if (r == meshtastic::TX_NOT_STARTED) break;      // radio wouldn't start: abort burst
+      tried++;
+      if (meshtastic::txUsedFallback(r)) irq_misses++;
       air += driver.getEstAirtimeFor(len);
       first = false;
+      if (!meshtastic::txDelivered(r)) { lost++; continue; }   // chip says it never went out
+      sent++;
       if (kinds[i] == 2) { pending_text = false; last_text_ms = millis(); }  // text delivered
     }
-    // Diagnostic: a missed TxDone interrupt means the packet still went out (via
-    // the airtime fallback) but the radio ISR isn't firing after the retune.
+    // Diagnostics. A missed TxDone interrupt no longer means the packet is lost:
+    // we ask the chip's own TxDone flag, so "IRQ missed" and "never transmitted"
+    // are separate reports instead of one guess. (mtbeacon v0.2.5)
     if (irq_misses)
-      Serial.printf("carnode: TxDone IRQ missed on %d/%d packet(s) - used airtime fallback\n",
-                    irq_misses, sent);
+      Serial.printf("carnode: TxDone IRQ missed on %d/%d packet(s) - checked the chip instead\n",
+                    irq_misses, tried);
+    if (lost)
+      Serial.printf("carnode: %d/%d packet(s) did NOT transmit (chip reports no TxDone)\n",
+                    lost, tried);
 
     meshtastic::radioRestoreMeshCore(driver, radio, c.home_freq, c.home_bw,
                 c.home_sf, c.home_cr, c.home_sync, c.home_tx_power);
@@ -511,7 +525,7 @@ public:
       if (n == (int)sizeof(Config) && magic == MAGIC) {
         memcpy(&cfg, buf, sizeof(cfg));
         sanitize();
-      } else if ((magic == MAGIC_V5 || magic == MAGIC_V6) &&
+      } else if ((magic == MAGIC_V5 || magic == MAGIC_V6 || magic == MAGIC_V7) &&
                  n > 4 && n <= (int)sizeof(Config)) {
         // Every version so far has only APPENDED fields, so the older prefix
         // layout is unchanged — copy what the file has, then force defaults for
@@ -524,7 +538,8 @@ public:
           cfg.home_radius_m = 100;
           cfg.home_lat = cfg.home_lon = 0;
         }
-        cfg.hop_limit = 0;                 // v6 and earlier had no hop knob
+        if (magic != MAGIC_V7) cfg.hop_limit = 0;  // v6 and earlier had no hop knob
+        cfg.short_name[0] = 0;             // v7 and earlier had no short name -> auto
         sanitize();
       }
     }
@@ -667,13 +682,16 @@ public:
     char ivl[10];
     if (cfg.interval_mins == 0) strcpy(ivl, "i:park");
     else snprintf(ivl, sizeof(ivl), "i%dm", (int)cfg.interval_mins);
+    char sn[5];
+    meshtastic::resolveShortName(sn, cfg.short_name, node_num);
+    // "!<id>/<short>" = Meshtastic node id and the short name / map label
     snprintf(reply, 160,
-             "mtbeacon %s %sMHz%s %s %s(SF%d BW%d) %s %ddBm%s h%d %s%s %s !%08lx",
+             "mtbeacon %s %sMHz%s %s %s(SF%d BW%d) %s %ddBm%s h%d %s%s %s !%08lx/%s",
              cfg.enabled ? "ON" : "off", fbuf, cfg.freq_override > 0.0f ? "*" : "",
              r.name, p.name, (int)cfg.sf, (int)cfg.bw, ivl,
              (int)ep, ep < cfg.tx_power ? "(cap)" : "", (int)cfg.hop_limit,
              cfg.send_nodeinfo ? "+info" : "", cfg.send_position ? "+pos" : "",
-             txt, (unsigned long)node_num);
+             txt, (unsigned long)node_num, sn);
   }
 
   // `carnode status` — the car-specific park behaviour + drive state.
@@ -734,7 +752,7 @@ public:
       beaconStatus(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printBeaconHelp();
-      strcpy(reply, "mtbeacon: status on off send | interval preset region freq power hops text text.mult nodeinfo position | presets regions");
+      strcpy(reply, "mtbeacon: status on off send | interval preset region freq power hops text text.mult short nodeinfo position | presets regions");
     } else if (memcmp(a, "nodeinfo ", 9) == 0) {
       cfg.send_nodeinfo = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - nodeinfo %s", cfg.send_nodeinfo ? "on" : "off");
@@ -808,6 +826,18 @@ public:
       else { cfg.text_mult = n; save(fs);
              if (n == 0) strcpy(reply, "OK - text off (silent presence only)");
              else sprintf(reply, "OK - text %dx per flood advert", n); }
+    } else if (memcmp(a, "short ", 6) == 0) {
+      const char* arg = a + 6;
+      char sn[5];
+      if (*arg == 0 || strcasecmp(arg, "auto") == 0) {
+        cfg.short_name[0] = 0;                        // auto: "MC" + 2 hex
+      } else {
+        strncpy(cfg.short_name, arg, sizeof(cfg.short_name) - 1);
+        cfg.short_name[sizeof(cfg.short_name) - 1] = 0;
+      }
+      save(fs);
+      meshtastic::resolveShortName(sn, cfg.short_name, node_num);
+      sprintf(reply, "OK - short name \"%s\"%s", sn, cfg.short_name[0] ? "" : " (auto)");
     } else if (memcmp(a, "text ", 5) == 0) {
       strncpy(cfg.text, a + 5, sizeof(cfg.text) - 1);
       cfg.text[sizeof(cfg.text) - 1] = 0;

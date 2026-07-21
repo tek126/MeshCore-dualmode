@@ -23,6 +23,7 @@
 #include <string.h>
 #include <CTR.h>     // rweather Crypto (already a MeshCore dependency)
 #include <AES.h>
+#include <RadioLib.h>          // RADIOLIB_IRQ_TX_DONE (hardware TxDone check)
 #include "MeshtasticProto.h"   // pure tables/hash/freq/protobuf (host-testable)
 
 namespace meshtastic {
@@ -151,35 +152,60 @@ void radioEnterMeshtastic(DriverT& driver, RadioT& radio,
   driver.setTxPower(tx_power);
 }
 
+// What actually happened to one transmit. Callers mostly care about the
+// did-it-go-out question (txDelivered); the finer grades exist so a node can
+// say WHY on the console instead of guessing.
+enum TxOutcome : uint8_t {
+  TX_NOT_STARTED,   // the radio refused to begin the transmit
+  TX_IRQ,           // normal path: the TxDone interrupt arrived
+  TX_HW_CONFIRMED,  // interrupt missed, but the chip's TxDone flag is set
+  TX_HW_FAILED,     // interrupt missed AND the chip's TxDone flag is clear
+  TX_PRESUMED,      // interrupt missed, chip can't report -> airtime bound only
+};
+
+inline bool txDelivered(TxOutcome o) {
+  return o == TX_IRQ || o == TX_HW_CONFIRMED || o == TX_PRESUMED;
+}
+inline bool txUsedFallback(TxOutcome o) {   // the TxDone interrupt didn't fire
+  return o == TX_HW_CONFIRMED || o == TX_HW_FAILED || o == TX_PRESUMED;
+}
+
 // Send one raw packet while already tuned; cooperates with the TX state machine.
 //
 // Completion is normally signalled by the radio's TxDone interrupt (surfaced by
 // the driver's isSendComplete()). After a Meshtastic retune that interrupt edge
 // can occasionally be missed -- which, with a fixed multi-second timeout, would
-// hang here and freeze the whole main loop while the node appears dead. As a
-// safety net we bound the wait by the packet's estimated airtime plus a margin:
-// once that has elapsed the packet has physically finished leaving the antenna,
-// so it is safe to move on and the packet still goes out. *irq_missed (if given)
-// is set true when we fell back to the airtime bound instead of the interrupt --
-// a direct "the TxDone IRQ isn't firing" diagnostic. Returns false only when the
-// transmit could not even be started.
-template <class DriverT>
-bool radioSendBlocking(DriverT& driver, const uint8_t* pkt, int len,
-                       bool* irq_missed = nullptr) {
-  if (irq_missed) *irq_missed = false;
-  if (!driver.startSendRaw(pkt, len)) return false;
+// hang here and freeze the whole main loop while the node appears dead. So the
+// wait is bounded by the packet's estimated airtime plus a margin: once that has
+// elapsed, a transmit that started has physically finished.
+//
+// The bound alone can't say whether the packet went out, because
+// RadioLibWrapper::isSendComplete() only reads a flag an ISR sets and never asks
+// the hardware -- so "sent, interrupt lost" and "never transmitted" look
+// identical from there (v0.2.4 assumed the former and could report a real
+// failure as success). When the interrupt doesn't arrive we now ask the chip
+// itself: RadioLib maps every family's TxDone bit onto the generic
+// RADIOLIB_IRQ_TX_DONE, so one call covers SX126x/SX127x/LR11x0/STM32WLx.
+//
+// The read MUST happen before onSendFinished(), whose finishTransmit() clears
+// the IRQ flags -- after that the evidence is gone.
+template <class DriverT, class RadioT>
+TxOutcome radioSendChecked(DriverT& driver, RadioT& radio,
+                           const uint8_t* pkt, int len) {
+  if (!driver.startSendRaw(pkt, len)) return TX_NOT_STARTED;
 
   uint32_t airtime = driver.getEstAirtimeFor(len);   // ms on air for this packet
   uint32_t cap = airtime * 2 + 500;                  // physical-done bound + margin
   uint32_t start = millis();
-  bool by_irq = false;
   while ((uint32_t)(millis() - start) <= cap) {
-    if (driver.isSendComplete()) { by_irq = true; break; }
+    if (driver.isSendComplete()) { driver.onSendFinished(); return TX_IRQ; }
     yield();
   }
+
+  int16_t tx_done = radio.checkIrq(RADIOLIB_IRQ_TX_DONE);   // before finishTransmit()
   driver.onSendFinished();
-  if (!by_irq && irq_missed) *irq_missed = true;
-  return true;   // sent: IRQ-confirmed, or airtime elapsed so physically done
+  if (tx_done < 0) return TX_PRESUMED;   // chip doesn't expose it: assume airtime
+  return tx_done > 0 ? TX_HW_CONFIRMED : TX_HW_FAILED;
 }
 
 template <class DriverT, class RadioT>
@@ -204,10 +230,10 @@ bool transmitOnce(DriverT& driver, RadioT& radio,
                   uint8_t home_sync,
                   int8_t mt_tx_power, int8_t home_tx_power) {
   radioEnterMeshtastic(driver, radio, mt, mt_tx_power);
-  bool ok = radioSendBlocking(driver, pkt, len);
+  TxOutcome r = radioSendChecked(driver, radio, pkt, len);
   radioRestoreMeshCore(driver, radio, home_freq, home_bw, home_sf, home_cr,
                        home_sync, home_tx_power);
-  return ok;
+  return txDelivered(r);
 }
 
 } // namespace meshtastic
