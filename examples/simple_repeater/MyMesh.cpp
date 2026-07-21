@@ -1078,10 +1078,10 @@ bool MyMesh::sendParkReadvert(int delay_millis) {
     MESH_DEBUG_PRINTLN("carnode: park re-advert dropped, send queue full");
     return false;
   }
-  // Deliberately NOT pulling the presence in (see CarNodeControl::onFloodAdvert):
-  // the park burst just finished and this advert is still queued behind the
-  // advertdelay, so a second retune 15 s out would land on top of it.
-  _carnode.onFloodAdvert(false);
+  // Deliberately NOT calling _carnode.onFloodAdvert() here (see its comment):
+  // the park burst just finished and already carried the chat text, and this
+  // advert is still queued behind advertdelay -- arming another Meshtastic
+  // burst 15 s out would land a second retune right on top of it.
   return true;
 }
 #endif

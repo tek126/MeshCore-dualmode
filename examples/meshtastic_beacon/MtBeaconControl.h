@@ -41,6 +41,7 @@ public:
     uint8_t  preset_idx;     // index into meshtastic::PRESETS
     uint8_t  send_nodeinfo;  // emit NodeInfo (named node) as part of presence
     uint8_t  send_position;  // emit Position (map pin) as part of presence
+    uint8_t  hop_limit;      // Meshtastic hop limit for presence + text (0-3, default 0)
     uint8_t  text_mult;      // chat text N times per flood-advert period (0=never; higher=more often)
     int8_t   tx_power;
     uint16_t interval_mins;  // PRESENCE cadence (silent NodeInfo+Position)
@@ -68,7 +69,7 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC = 0x3442544DUL;  // 'MTB4' (bumped: layout changed)
+  static const uint32_t MAGIC = 0x3542544DUL;  // 'MTB5' (bumped: added hop_limit)
 
   Config cfg;
   uint32_t node_num = 0;
@@ -98,6 +99,7 @@ private:
     cfg.preset_idx = 0;        // LongFast
     cfg.send_nodeinfo = 1;
     cfg.send_position = 1;
+    cfg.hop_limit = 0;         // 0 hops: heard by direct neighbors, never rebroadcast
     cfg.text_mult = 1;         // text once per flood advert (~rare, by design)
     cfg.freq_override = 0.0f;  // auto
     cfg.tx_power = 22;
@@ -125,6 +127,7 @@ private:
     cfg.tx_power = constrain(cfg.tx_power, -9, 22);
     cfg.interval_mins = constrain(cfg.interval_mins, 1, 1440);
     cfg.enabled = cfg.enabled ? 1 : 0;
+    if (cfg.hop_limit > 3) cfg.hop_limit = 3;   // Meshtastic hop limit cap
     cfg.text[sizeof(cfg.text) - 1] = 0;
     recompute();   // re-derive in case the preset/region tables changed
   }
@@ -148,6 +151,7 @@ private:
     Serial.println(F("  region <name>      region/country band (US, EU_868, ...)"));
     Serial.println(F("  freq <MHz|auto>    manual frequency override; auto = region+preset"));
     Serial.println(F("  power <dBm>        TX power, -9..22 (capped to region limit)"));
+    Serial.println(F("  hops <0-3>         Meshtastic hop limit for presence + text (default 0)"));
     Serial.println(F("  text <string>      the chat-message content (<=63 chars)"));
     Serial.println(F("  nodeinfo on|off    include NodeInfo (named node 'MC <name>')"));
     Serial.println(F("  position on|off    include Position (map pin) if location set"));
@@ -222,15 +226,15 @@ private:
       snprintf(sn, sizeof(sn), "%04lx", (unsigned long)(node_num & 0xFFFF));
       int n = meshtastic::buildUserPayload(pl, node_num, ln, sn, MT_HW_MODEL);
       return meshtastic::buildDataPacket(pkt, cap, node_num, nextId(),
-                meshtastic::PORT_NODEINFO, pl, n, key, klen, chan_hash);
+                meshtastic::PORT_NODEINFO, pl, n, key, klen, chan_hash, cfg.hop_limit);
     } else if (k == 1) {
       if (!cfg.send_position || (c.lat == 0.0 && c.lon == 0.0)) return 0;
       int n = meshtastic::buildPositionPayload(pl, c.lat, c.lon, c.epoch);
       return meshtastic::buildDataPacket(pkt, cap, node_num, nextId(),
-                meshtastic::PORT_POSITION, pl, n, key, klen, chan_hash);
+                meshtastic::PORT_POSITION, pl, n, key, klen, chan_hash, cfg.hop_limit);
     }
     return meshtastic::buildTextPacket(pkt, cap, node_num, nextId(),
-                cfg.text, key, klen, chan_hash);
+                cfg.text, key, klen, chan_hash, cfg.hop_limit);
   }
 
   // One retune: emit the silent presence (NodeInfo + Position) plus the chat
@@ -368,10 +372,10 @@ public:
     // single bounded write -> shows the full text, never overflows reply[160]
     // "p<N>m" = presence cadence; "txt<N>x" = text N times per flood-advert period
     snprintf(reply, 160,
-             "beacon %s %sMHz%s %s %s(SF%d BW%d) p%dm %ddBm%s %s%s %s !%08lx \"%s\"",
+             "beacon %s %sMHz%s %s %s(SF%d BW%d) p%dm %ddBm%s h%d %s%s %s !%08lx \"%s\"",
              cfg.enabled ? "ON" : "off", fbuf, cfg.freq_override > 0.0f ? "*" : "",
              r.name, p.name, (int)cfg.sf, (int)cfg.bw, (int)cfg.interval_mins,
-             (int)ep, ep < cfg.tx_power ? "(cap)" : "",
+             (int)ep, ep < cfg.tx_power ? "(cap)" : "", (int)cfg.hop_limit,
              cfg.send_nodeinfo ? "+info" : "", cfg.send_position ? "+pos" : "",
              txt, (unsigned long)node_num, cfg.text);
   }
@@ -386,7 +390,7 @@ public:
       status(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printHelp();
-      strcpy(reply, "cmds: status on off send | interval text.mult text freq power preset region nodeinfo position | presets regions help");
+      strcpy(reply, "cmds: status on off send | interval text.mult text freq power hops preset region nodeinfo position | presets regions help");
     } else if (memcmp(a, "nodeinfo ", 9) == 0) {
       cfg.send_nodeinfo = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - nodeinfo %s", cfg.send_nodeinfo ? "on" : "off");
@@ -447,6 +451,11 @@ public:
       int p = atoi(a + 6);
       if (p < -9 || p > 22) { strcpy(reply, "Error: power -9..22 dBm"); }
       else { cfg.tx_power = p; save(fs); sprintf(reply, "OK - %d dBm", p); }
+    } else if (memcmp(a, "hops ", 5) == 0) {
+      int h = atoi(a + 5);
+      if (h < 0 || h > 3) { strcpy(reply, "Error: hops 0-3"); }
+      else { cfg.hop_limit = (uint8_t)h; save(fs);
+             sprintf(reply, "OK - hop limit %d%s", h, h == 0 ? " (neighbors only)" : ""); }
     } else if (memcmp(a, "text.mult ", 10) == 0) {
       int n = atoi(a + 10);
       if (n < 0 || n > 255) { strcpy(reply, "Error: 0-255 (0 = never post text)"); }

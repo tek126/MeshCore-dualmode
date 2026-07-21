@@ -121,6 +121,9 @@ public:
     uint8_t  have_home;
     uint16_t home_radius_m;
     double   home_lat, home_lon;
+    // v7: Meshtastic hop limit (mtbeacon v0.2.0 parity). Appended, so the
+    // v5/v6 -> v7 load migrations keep everything above.
+    uint8_t  hop_limit;      // hop limit for presence + text (0-3, default 0)
   };
 
   // Live per-tick context the repeater supplies. lat/lon are the CURRENT GPS fix
@@ -137,7 +140,8 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC    = 0x364E5241UL;  // 'ARN6' — car-node config v6 (+home)
+  static const uint32_t MAGIC    = 0x374E5241UL;  // 'ARN7' — car-node config v7 (+hop_limit)
+  static const uint32_t MAGIC_V6 = 0x364E5241UL;  // 'ARN6' — v6 (+home; migrated on load)
   static const uint32_t MAGIC_V5 = 0x354E5241UL;  // 'ARN5' — v5 (migrated on load)
 
   Config cfg;
@@ -242,6 +246,7 @@ private:
     cfg.send_nodeinfo = 1;
     cfg.send_position = 1;
     cfg.text_mult = 1;         // text once per flood advert (rare, by design)
+    cfg.hop_limit = 0;         // 0 hops: heard by direct neighbors, never rebroadcast
     cfg.freq_override = 0.0f;  // auto
     cfg.tx_power = 22;         // vehicle-powered: favour visibility (region-capped)
     cfg.park_secs = 300;       // stopped for 5 min -> push a location update
@@ -280,6 +285,7 @@ private:
     cfg.home_radius_m = constrain(cfg.home_radius_m, 5, 2000);
     cfg.enabled = cfg.enabled ? 1 : 0;
     cfg.have_home = cfg.have_home ? 1 : 0;
+    if (cfg.hop_limit > 3) cfg.hop_limit = 3;   // Meshtastic hop limit cap
     cfg.text[sizeof(cfg.text) - 1] = 0;
     recompute();   // re-derive in case the preset/region tables changed
   }
@@ -297,6 +303,7 @@ private:
     Serial.println(F("  region <name>      region/country band (US, EU_868, ...)"));
     Serial.println(F("  freq <MHz|auto>    manual frequency override; auto = region+preset"));
     Serial.println(F("  power <dBm>        TX power, -9..22 (capped to region limit)"));
+    Serial.println(F("  hops <0-3>         Meshtastic hop limit for presence + text (default 0)"));
     Serial.println(F("  text <string>      the chat-message content (<=63 chars)"));
     Serial.println(F("  text.mult <N>      chat text N times per flood-advert period (0=never)"));
     Serial.println(F("  nodeinfo on|off    include NodeInfo (named node 'MC <name>')"));
@@ -384,15 +391,15 @@ private:
       snprintf(sn, sizeof(sn), "%04lx", (unsigned long)(node_num & 0xFFFF));
       int n = meshtastic::buildUserPayload(pl, node_num, ln, sn, MT_HW_MODEL);
       return meshtastic::buildDataPacket(pkt, cap, node_num, nextId(),
-                meshtastic::PORT_NODEINFO, pl, n, key, klen, chan_hash);
+                meshtastic::PORT_NODEINFO, pl, n, key, klen, chan_hash, cfg.hop_limit);
     } else if (k == 1) {
       if (!cfg.send_position || !c.gps_valid) return 0;
       int n = meshtastic::buildPositionPayload(pl, c.lat, c.lon, c.epoch);
       return meshtastic::buildDataPacket(pkt, cap, node_num, nextId(),
-                meshtastic::PORT_POSITION, pl, n, key, klen, chan_hash);
+                meshtastic::PORT_POSITION, pl, n, key, klen, chan_hash, cfg.hop_limit);
     }
     return meshtastic::buildTextPacket(pkt, cap, node_num, nextId(),
-                cfg.text, key, klen, chan_hash);
+                cfg.text, key, klen, chan_hash, cfg.hop_limit);
   }
 
   // Schedule the next periodic presence, with up to 20 s of random jitter so we
@@ -504,15 +511,20 @@ public:
       if (n == (int)sizeof(Config) && magic == MAGIC) {
         memcpy(&cfg, buf, sizeof(cfg));
         sanitize();
-      } else if (magic == MAGIC_V5 && n > 4 && n <= (int)sizeof(Config)) {
-        // v5 -> v6: the home fields were appended, so the v5 prefix layout is
-        // unchanged — copy what the file has, then force defaults for the new
-        // fields (the copy may have clobbered ones that landed in old padding).
+      } else if ((magic == MAGIC_V5 || magic == MAGIC_V6) &&
+                 n > 4 && n <= (int)sizeof(Config)) {
+        // Every version so far has only APPENDED fields, so the older prefix
+        // layout is unchanged — copy what the file has, then force defaults for
+        // the fields that version didn't have (the copy may have clobbered ones
+        // that landed in old padding). Park/home/sleep settings are preserved.
         memcpy(&cfg, buf, n);
         cfg.magic = MAGIC;
-        cfg.have_home = 0;
-        cfg.home_radius_m = 100;
-        cfg.home_lat = cfg.home_lon = 0;
+        if (magic == MAGIC_V5) {           // v5 had no home
+          cfg.have_home = 0;
+          cfg.home_radius_m = 100;
+          cfg.home_lat = cfg.home_lon = 0;
+        }
+        cfg.hop_limit = 0;                 // v6 and earlier had no hop knob
         sanitize();
       }
     }
@@ -549,16 +561,14 @@ public:
   // extra texts between adverts when text_mult > 1. At home nothing changes:
   // presence stays suppressed, the text just stays pending until driving.
   //
-  // pull_presence=false is for our OWN park re-advert: the park burst has just
-  // finished (and already carried the text if it was due), and the advert is
-  // sitting in the send queue behind `advertdelay`. Scheduling another
-  // Meshtastic burst 15 s out would put a second off-channel retune right on
-  // top of the advert we are trying to get out. Arm the text so it still rides
-  // a real advert, but let it wait for the next scheduled presence.
-  void onFloodAdvert(bool pull_presence = true) {
+  // NOT called for our own park re-advert: that burst has just gone out and
+  // already carried the text (armed in tick()), and the advert is still sitting
+  // in the send queue behind `advertdelay` -- scheduling another Meshtastic
+  // burst 15 s out would drop a second off-channel retune right on top of it.
+  void onFloodAdvert() {
     if (!cfg.enabled || cfg.text_mult == 0) return;
     pending_text = true;
-    if (pull_presence && cfg.interval_mins > 0 && next_presence != 0) {
+    if (cfg.interval_mins > 0 && next_presence != 0) {   // pull the next presence close
       unsigned long soon = millis() + 15000;             // let the advert TX clear the air
       if ((int32_t)(next_presence - soon) > 0) next_presence = soon;
     }
@@ -658,10 +668,10 @@ public:
     if (cfg.interval_mins == 0) strcpy(ivl, "i:park");
     else snprintf(ivl, sizeof(ivl), "i%dm", (int)cfg.interval_mins);
     snprintf(reply, 160,
-             "mtbeacon %s %sMHz%s %s %s(SF%d BW%d) %s %ddBm%s %s%s %s !%08lx",
+             "mtbeacon %s %sMHz%s %s %s(SF%d BW%d) %s %ddBm%s h%d %s%s %s !%08lx",
              cfg.enabled ? "ON" : "off", fbuf, cfg.freq_override > 0.0f ? "*" : "",
              r.name, p.name, (int)cfg.sf, (int)cfg.bw, ivl,
-             (int)ep, ep < cfg.tx_power ? "(cap)" : "",
+             (int)ep, ep < cfg.tx_power ? "(cap)" : "", (int)cfg.hop_limit,
              cfg.send_nodeinfo ? "+info" : "", cfg.send_position ? "+pos" : "",
              txt, (unsigned long)node_num);
   }
@@ -724,7 +734,7 @@ public:
       beaconStatus(reply);
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printBeaconHelp();
-      strcpy(reply, "mtbeacon: status on off send | interval preset region freq power text text.mult nodeinfo position | presets regions");
+      strcpy(reply, "mtbeacon: status on off send | interval preset region freq power hops text text.mult nodeinfo position | presets regions");
     } else if (memcmp(a, "nodeinfo ", 9) == 0) {
       cfg.send_nodeinfo = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - nodeinfo %s", cfg.send_nodeinfo ? "on" : "off");
@@ -787,6 +797,11 @@ public:
       int p = atoi(a + 6);
       if (p < -9 || p > 22) { strcpy(reply, "Error: power -9..22 dBm"); }
       else { cfg.tx_power = p; save(fs); sprintf(reply, "OK - %d dBm", p); }
+    } else if (memcmp(a, "hops ", 5) == 0) {
+      int h = atoi(a + 5);
+      if (h < 0 || h > 3) { strcpy(reply, "Error: hops 0-3"); }
+      else { cfg.hop_limit = (uint8_t)h; save(fs);
+             sprintf(reply, "OK - hop limit %d%s", h, h == 0 ? " (neighbors only)" : ""); }
     } else if (memcmp(a, "text.mult ", 10) == 0) {
       int n = atoi(a + 10);
       if (n < 0 || n > 255) { strcpy(reply, "Error: 0-255 (0 = never post text)"); }
@@ -970,6 +985,13 @@ public:
     if (!manual && !park_event && !presence_due) return;
 
     if (cfg.enabled && textDue(now)) pending_text = true;      // arm the chat text if due
+
+    // A new-spot park broadcast is always followed by a MeshCore flood
+    // re-advert, so by the v0.2.3 rule (the text rides real flood adverts) the
+    // text belongs in THIS burst. Arming it here costs no extra airtime -- the
+    // retune is already happening -- and avoids scheduling a second Meshtastic
+    // burst on top of the advert we are about to queue.
+    if (park_event && cfg.enabled && cfg.text_mult > 0) pending_text = true;
 
     if (manual || park_event) {
       // Full location update:

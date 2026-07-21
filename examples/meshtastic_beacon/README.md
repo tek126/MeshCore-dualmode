@@ -103,22 +103,37 @@ Then, over serial or via an admin remote-CLI session, use the `mtbeacon` verbs:
 | `mtbeacon` / `mtbeacon status` | show current config + derived node id |
 | `mtbeacon help` | list all commands (detailed list prints to serial) |
 | `mtbeacon on` / `mtbeacon off` | enable / disable periodic beaconing |
-| `mtbeacon send` | transmit one beacon now (works even when off) |
-| `mtbeacon interval <min>` | set period (1–1440 min) |
+| `mtbeacon send` | transmit one beacon now, text included (works even when off) |
+| `mtbeacon interval <min>` | presence period (1–1440 min, default 30) |
 | `mtbeacon preset <name>` | modem preset: LongFast, LongMod, LongSlow, MediumFast, MediumSlow, ShortFast, ShortSlow, ShortTurbo |
 | `mtbeacon region <name>` | region/country band: US, EU_868, EU_433, ANZ, CN, JP, KR, TW, RU, IN, NZ_865, TH, UA_433, UA_868 (alias `country`) |
 | `mtbeacon freq <MHz\|auto>` | manual frequency override; `auto` re-derives from region+preset |
 | `mtbeacon power <dBm>` | set TX power (−9…22), auto-capped to the region limit |
+| `mtbeacon hops <0-3>` | Meshtastic hop limit for presence + text (**default 0**) |
 | `mtbeacon text <string>` | set the announced text (≤63 chars) |
+| `mtbeacon text.mult <N>` | text pacing: rides each flood advert, plus N−1 timer-paced extras per period (0 = never) |
 | `mtbeacon nodeinfo on/off` | also emit a NodeInfo (named node) — default on |
 | `mtbeacon position on/off` | also emit a Position (map pin) — default on |
 | `mtbeacon presets` / `mtbeacon regions` | list available preset / region names |
 
-**Shows up as a node on the Meshtastic map.** Each beacon emits three packets in
-one retune: a **NodeInfo** (so the repeater appears as a named node — long name
-`MC <repeater name>`, short name = last 4 of the node id), a **Position** (a map
-pin, using the repeater's configured lat/lon; skipped if unset), and the **text**
-announcement. Toggle the first two with `nodeinfo`/`position`.
+**Shows up as a node on the Meshtastic map.** The periodic beacon is a silent
+*presence*: a **NodeInfo** (so the repeater appears as a named node — long name
+`MC <repeater name>`, short name = last 4 of the node id) and a **Position**
+(a map pin, using the repeater's configured lat/lon; skipped if unset). At slow
+presets the two alternate, one per cycle, to bound the off-channel window.
+Toggle them with `nodeinfo`/`position`.
+
+**Chat text.** The `text` message is deliberately rarer than the presence, and
+it's **event-driven**: whenever the repeater floods a MeshCore advert — the
+periodic flood advert or an explicit CLI `advert` — the text rides a beacon
+burst a few seconds later. So the chat announcement tracks the repeater's real
+advert cadence (default 47 h), and running `advert` doubles as a live test.
+`text.mult > 1` adds timer-paced extra texts between adverts (N per advert
+period); `text.mult 0` disables the text, leaving a silent presence-only
+beacon. `mtbeacon status` shows the pacing live, e.g. `txt1x~47h(due 13h)` —
+or `(due now)` when a text is armed and waiting for the next burst;
+`txt1x(noadv)` means the repeater's flood advert is off, which disables the
+timer pacing (an explicit `advert` still carries the text).
 
 **Region + preset auto-tune the frequency.** Setting `region` or `preset`
 computes the exact Meshtastic default-channel frequency the same way Meshtastic
@@ -131,17 +146,42 @@ LongFast → 869.525). `mtbeacon freq` is only for a manual override; a `*` in
 12 dBm, JP 16 dBm); the configured power is clamped to it, shown as `(cap)` in
 `status`.
 
-Settings persist to `/mtbeacon` in the internal filesystem (separate from
-`NodePrefs` — core prefs are untouched). Defaults are US LongFast, 5-min
-interval, disabled until you `mtbeacon on`. The node number is derived from the
-repeater's identity, so it's stable across reboots.
+**Hop limit.** The beacon's Meshtastic packets go out at **0 hops by default**, so
+they're heard only by direct neighbors and are **never rebroadcast** across the
+Meshtastic network — a deliberately light-footprint default for a foreign beacon.
+Raise it with `mtbeacon hops <0-3>` (capped at 3) if you want limited relaying.
+Shown as `h<N>` in `status`.
 
-The beacon only fires when the mesh is idle (`!hasPendingWork() && !receiving`),
-deferring a few seconds otherwise, so it never retunes mid-transaction. It
-restores the repeater's *current* radio params afterward (including any active
-`tempradio` override). To add it to another board, copy the
+Settings persist to `/mtbeacon` in the internal filesystem (separate from
+`NodePrefs` — core prefs are untouched). Defaults are US LongFast, 30-min
+presence, text once per flood advert, disabled until you `mtbeacon on`. The
+node number is derived from the repeater's identity, so it's stable across
+reboots.
+
+The beacon only fires when the mesh is idle (`!hasPendingWork() && !receiving`
+&& not mid-transmit), deferring a few seconds otherwise, so it never retunes
+mid-transaction. It restores the repeater's *current* radio params afterward
+(including any active `tempradio` override) and re-arms receive immediately, so
+power-saving nodes don't sleep deaf. To add it to another board, copy the
 `*_repeater_mtbeacon` env shape: extend that board's repeater env and add
 `-D WITH_MT_BEACON -I examples/meshtastic_beacon`.
+
+## Reliability (nRF52 boards)
+
+nRF52 builds (RAK4631, ProMicro/Faketec, T114, T1000-E, XIAO nRF52, …) arm the
+**hardware watchdog** (90 s, fed every loop pass): if the node ever hard-hangs,
+it reboots itself instead of sitting dead until someone power-cycles it. DFU
+updates are unaffected (the UF2 bootloader feeds a running watchdog).
+
+Every boot prints its **reset reason** to serial, and it's remotely queryable
+on any nRF52 board:
+
+```
+get pwrmgt.bootreason
+> Reset: Watchdog
+```
+
+`Watchdog` there means the node hung and rescued itself — worth a bug report.
 
 ## Scope / etiquette
 

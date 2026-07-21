@@ -109,6 +109,7 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 | `mtbeacon region <name>` | region/country band (US, EU_868, …) |
 | `mtbeacon freq <MHz\|auto>` | manual frequency override; `auto` re-derives |
 | `mtbeacon power <dBm>` | TX power (−9…22), capped to region limit |
+| `mtbeacon hops <0-3>` | Meshtastic hop limit for presence + text (default 0 = direct neighbors only) |
 | `mtbeacon text <string>` | announced chat text (≤63 chars) |
 | `mtbeacon text.mult <N>` | text pacing: rides each flood advert, plus N−1 timer-paced extras per period (0 = never) |
 | `mtbeacon nodeinfo on/off` | include NodeInfo (named node) — default on |
@@ -150,6 +151,13 @@ Both use the *same* fix at the *same* moment. Re-parking in the same spot won't
 re-broadcast (dedup by `radius`); `mtbeacon send` forces an update immediately.
 The MeshCore location is persisted, so it survives a reboot while parked.
 
+The two halves are independent once armed: if the mesh cannot queue the flood
+advert (packet pool or send queue full while the repeater is forwarding a
+burst), the car node retries the handoff a few times with a backoff rather than
+losing the park silently, and leaves the periodic flood-advert timer alone so
+the next scheduled advert still carries the location. `carnode status` shows
+`adv!N` if any park re-advert was abandoned outright — normally absent.
+
 **Periodic presence.** Between park events, a light presence beacon (base-mtbeacon
 style) fires every `interval` minutes (default 30, `0` = park-only) so the node
 doesn't age out of Meshtastic node lists. While **parked** it includes Position —
@@ -166,6 +174,12 @@ between adverts; `text.mult 0` disables the text entirely.) `mtbeacon status`
 shows the pacing live, e.g. `txt1x~47h(due 13h)` — or `(due now)` when a text
 is armed and waiting for the next burst. At home, nothing transmits; an armed
 text just stays pending until you drive away.
+
+**Hop limit.** Meshtastic packets go out at `hops 0` by default — heard by
+direct neighbors, never rebroadcast. A car node is mobile and transmits from
+wherever it parks, so rebroadcasting its position across someone else's mesh is
+poor manners; `mtbeacon hops <0-3>` raises it if you specifically need the
+reach. (Matches the base beacon's default since mtbeacon v0.2.0.)
 
 > The MeshCore side relies on `advert_loc_policy = prefs` (the repeater default),
 > which this build keeps. The car node writes the fix into prefs itself rather
