@@ -77,14 +77,18 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "16 Jul 2026"
+  #define FIRMWARE_BUILD_DATE   "21 Jul 2026"
 #endif
 
+// Fallbacks only: the *_carnode envs override FIRMWARE_VERSION with the git
+// short SHA via carnode_version.py. Keep these in step with the mtbeacon
+// version the beacon here is synced to, so a build without the extra_script
+// still reports something truthful.
 #ifndef FIRMWARE_VERSION
   #ifdef WITH_MT_BEACON
-    #define FIRMWARE_VERSION   "v1.16.0+mtbeacon-0.2.3"
+    #define FIRMWARE_VERSION   "v1.16.0+mtbeacon-0.2.5"
   #elif defined(WITH_CAR_NODE)
-    #define FIRMWARE_VERSION   "v1.16.0+carnode-0.2.3"
+    #define FIRMWARE_VERSION   "v1.16.0+carnode-0.2.5"
   #else
     #define FIRMWARE_VERSION   "v1.16.0"
   #endif
