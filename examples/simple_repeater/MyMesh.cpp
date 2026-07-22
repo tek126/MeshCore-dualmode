@@ -1465,23 +1465,11 @@ void MyMesh::loop() {
       }
     }
 
-    // Repeat sleep: parked past the limit (or parked at home, which suppresses
-    // immediately) -> toggle the actual repeat switch
-    // off (the same pref as 'set repeat on|off'), so forwarding, 'get repeat'
-    // and remote status all agree. Waking (driving detected) restores repeat
-    // only if it was on when the sleep tripped, so an operator's own
-    // 'set repeat off' survives a park-sleep cycle. Not saved to prefs here:
-    // a reboot starts awake, per the documented sleep semantics.
-    bool slp = _carnode.repeatSuppressed();
-    if (slp != carnode_sleeping) {
-      carnode_sleeping = slp;
-      if (slp) {
-        carnode_restore_fwd = !_prefs.disable_fwd;
-        _prefs.disable_fwd = 1;
-      } else if (carnode_restore_fwd) {
-        _prefs.disable_fwd = 0;
-      }
-    }
+    // Repeat sleep (parked past the limit, or parked in a quiet zone, which
+    // suppresses immediately) needs nothing here: repeatDisabled() ORs
+    // _carnode.repeatSuppressed() in, so forwarding, the advert 'disabled' bit
+    // and node-discover all follow it without anyone writing to _prefs. See the
+    // comment on repeatDisabled() for why touching the pref was a bug.
   }
 #endif
 

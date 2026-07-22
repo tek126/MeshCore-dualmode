@@ -247,26 +247,37 @@ battery sense report nothing rather than a misleading 0%.
 
 **Repeat sleep.** A car parked for a day is probably somewhere nobody needs a
 mobile repeater. After the vehicle has sat still for `sleep` hours (default 20)
-the node turns **repeat off** — the same switch as `set repeat off`, so
-`get repeat`, remote status and the actual forwarding all agree — while it still
-receives, answers its own commands, adverts, and beacons. Repeat switches back
-on the moment driving is detected (the parked fix moves outside `radius`);
-if *you* had set repeat off before the sleep tripped, waking leaves it off.
-Losing the GPS fix while parked (underground garage) does *not* wake it; only
-movement does. The sleep toggle is not persisted: a reboot starts awake, and
-`carnode sleep 0` disables the feature.
+the node stops **forwarding** — remote status reports it disabled, and it drops
+out of node-discover — while it still receives, answers its own commands,
+adverts, and beacons. Forwarding resumes the moment driving is detected (the
+parked fix moves outside `radius`). Losing the GPS fix while parked (underground
+garage) does *not* wake it; only movement does. `carnode sleep 0` disables the
+feature.
+
+Suppression is a **runtime condition layered over** the `set repeat on|off`
+pref, not a write to it. Your own setting is never touched, `get repeat` always
+reports what *you* chose, and nothing can persist a sleeping state — a reboot
+always starts awake. `carnode status` shows `rpt:off` while suppression is
+active, which is the one place the pref and the effective state can disagree.
+
+> Before v0.2.7 the sleep wrote the pref directly and restored it on wake. Any
+> unrelated `set …` command persists the whole prefs struct, so changing a
+> setting while parked in a quiet zone saved the suppressed value to flash —
+> after which the wake path read it back as "the operator wanted this off" and
+> never restored forwarding again. If a node has been quiet since, `set repeat
+> on` once (parked outside any zone) clears it for good.
 
 **Quiet zones.** Park where the vehicle usually lives and say
 `carnode zone add home` — the node stores the current (median-filtered) spot
 under that name, persisted in `/carnode`. From then on, parking within the
-zone's radius (default 100 m) turns **repeat off** immediately — no waiting for
+zone's radius (default 100 m) stops **forwarding** immediately — no waiting for
 the `sleep` timer — on the logic that a place you park at every day already has
 fixed coverage and doesn't need a mobile repeater idling in the driveway. Inside
 a zone the node also goes **radio-quiet**: the park burst, the MeshCore
 re-advert, *and* the periodic presence are all suppressed, so that location is
 never put on the air (an explicit `carnode send` still transmits if you ask for
-it). Driving away restores repeat and the normal beacon behaviour, exactly like
-waking from sleep. Losing the fix inside a zone (garage) keeps you in it; only
+it). Driving away restores forwarding and the normal beacon behaviour, exactly
+like waking from sleep. Losing the fix inside a zone (garage) keeps you in it; only
 driving away clears it.
 
 Up to **4 zones** can be stored — home, work, a regular customer site — each

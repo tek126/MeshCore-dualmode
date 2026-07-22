@@ -88,7 +88,7 @@ struct NeighbourInfo {
   #ifdef WITH_MT_BEACON
     #define FIRMWARE_VERSION   "v1.16.0+mtbeacon-0.2.6"
   #elif defined(WITH_CAR_NODE)
-    #define FIRMWARE_VERSION   "v1.16.0+carnode-0.2.6"
+    #define FIRMWARE_VERSION   "v1.16.0+carnode-0.2.7"
   #else
     #define FIRMWARE_VERSION   "v1.16.0"
   #endif
@@ -112,8 +112,6 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #endif
 #ifdef WITH_CAR_NODE
   CarNodeControl _carnode;
-  bool carnode_sleeping = false;     // park sleep currently has repeat forced off
-  bool carnode_restore_fwd = false;  // repeat was ON when the sleep tripped -> restore on wake
 #endif
   uint8_t reply_data[MAX_PACKET_PAYLOAD];
   uint8_t reply_path[MAX_PATH_SIZE];
@@ -156,10 +154,22 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
 
-  // Is forwarding currently off? The 'set repeat on|off' pref. On a car node
-  // the park sleep toggles this same pref (see the carnode block in loop()),
-  // so there is one switch and 'get repeat' / remote status always show it.
+  // Is forwarding currently off? Either the 'set repeat on|off' pref, or -- on a
+  // car node -- the park sleep / quiet zone holding it off for now.
+  //
+  // The two are deliberately kept SEPARATE. An earlier version had the car node
+  // write _prefs.disable_fwd directly and restore it on wake, which looked tidy
+  // ("one switch, visible everywhere") but was a latch waiting to happen: any
+  // unrelated `set ...` command persists the whole NodePrefs struct, so touching
+  // a setting while parked in a quiet zone wrote the suppressed value to flash.
+  // From then on the wake path -- which only restores repeat if it was ON when
+  // the sleep tripped -- read back OFF, captured "don't restore", and left the
+  // node deaf for good. Suppression is a runtime condition; it does not get a
+  // vote on a persisted pref.
   bool repeatDisabled() const {
+#ifdef WITH_CAR_NODE
+    if (_carnode.repeatSuppressed()) return true;
+#endif
     return _prefs.disable_fwd;
   }
 

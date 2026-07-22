@@ -778,13 +778,14 @@ public:
   //     presumably has fixed coverage already; or
   //   * parked anywhere past `carnode sleep <hours>` — a car parked for a day
   //     is probably somewhere nobody needs a mobile repeater.
-  // The repeater polls this each loop and toggles its actual 'repeat' pref to
-  // match (the same switch as 'set repeat on|off'), so the state is visible
-  // everywhere. Keyed off the park anchor (not drive_state), so losing the GPS
-  // fix in a garage does NOT wake the repeater; only actually moving does.
-  // Clears itself as soon as driving resumes (the anchor follows the vehicle,
-  // the clock restarts, in_zone drops). Runtime-only: nothing is persisted
-  // here, so a reboot starts awake.
+  // The repeater ORs this into its own repeatDisabled(), so forwarding stops
+  // without anything being written to its prefs -- the operator's own
+  // 'set repeat on|off' stays independent and untouched. Keyed off the park
+  // anchor (not drive_state), so losing the GPS fix in a garage does NOT wake
+  // the repeater; only actually moving does. Clears itself as soon as driving
+  // resumes (the anchor follows the vehicle, the clock restarts, in_zone drops).
+  // Purely a runtime condition: nothing here is persisted, so a reboot starts
+  // awake, and no code path can cement it into flash.
   bool repeatSuppressed() const {
     if (!cfg.enabled || !have_anchor) return false;
     if (in_zone >= 0) return true;
@@ -892,9 +893,12 @@ public:
     // omitted entirely when zero, which is the normal case.
     char drops[12] = {0};
     if (readvert_drops) snprintf(drops, sizeof(drops), " adv!%d", (int)readvert_drops);
+    // Spelled out because `get repeat` reports the *pref*, which suppression no
+    // longer touches -- this is the only place the two are shown to disagree.
+    const char* rpt = repeatSuppressed() ? " rpt:off" : "";
     snprintf(reply, 160,
-             "carnode %s [%s%s] park%ds r%dm adv%ds %s %s loc:%s%s !%08lx",
-             cfg.enabled ? "ON" : "off", st, trk,
+             "carnode %s [%s%s]%s park%ds r%dm adv%ds %s %s loc:%s%s !%08lx",
+             cfg.enabled ? "ON" : "off", st, trk, rpt,
              (int)cfg.park_secs, (int)cfg.stop_radius_m, (int)cfg.advert_delay_s,
              slp, hm, have_advert ? "set" : "none", drops, (unsigned long)node_num);
   }
