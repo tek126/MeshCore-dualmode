@@ -103,7 +103,8 @@ inline int findRegion(const char* name) {
 }
 
 // --- minimal protobuf writers ---
-enum PortNum { PORT_TEXT = 1, PORT_POSITION = 3, PORT_NODEINFO = 4 };
+enum PortNum { PORT_TEXT = 1, PORT_POSITION = 3, PORT_NODEINFO = 4,
+               PORT_TELEMETRY = 67 };
 
 inline int pbVarint(uint8_t* o, uint64_t v) {
   int n = 0;
@@ -134,6 +135,11 @@ inline int pbFixed32(uint8_t* o, uint32_t field, uint32_t v) {
 inline int pbUint32(uint8_t* o, uint32_t field, uint32_t v) {
   int n = pbKey(o, field, 0);          // wire type 0 = varint
   n += pbVarint(o + n, v);
+  return n;
+}
+inline int pbFloat(uint8_t* o, uint32_t field, float v) {
+  int n = pbKey(o, field, 5);          // wire type 5 = 32-bit
+  memcpy(o + n, &v, 4); n += 4;        // little-endian IEEE-754 (ARM/x86 native)
   return n;
 }
 
@@ -190,6 +196,149 @@ inline int buildPositionPayload(uint8_t* out, double lat, double lon, uint32_t t
   if (time_s > 1600000000u) n += pbFixed32(out + n, 4, time_s);  // time (fixed32!)
   n += pbUint32(out + n, 23, 32);         // precision_bits (field 23!) = full -> map pin
   return n;
+}
+
+// Meshtastic DeviceMetrics.battery_level is a PERCENTAGE, but a MeshCore board
+// only exposes a raw millivolt reading (mesh::MainBoard::getBattMilliVolts).
+// Map it across the usual 1S Li-ion working range, 3.3 V empty -> 4.2 V full.
+// That is a coarse straight line through a curved discharge, but it is the same
+// approximation used everywhere there's no fuel-gauge IC, and it is honest at
+// the two ends that matter (nearly flat / nearly full).
+// Returns -1 when the board reports nothing at all (no battery sense wired up),
+// so the caller can omit the field rather than publish a confident 0%.
+inline int batteryPercent(uint16_t milli_volts) {
+  if (milli_volts == 0) return -1;
+  const long lo = 3300, hi = 4200;
+  long pct = ((long)milli_volts - lo) * 100 / (hi - lo);
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  return (int)pct;
+}
+
+// Meshtastic Telemetry message carrying DeviceMetrics — what phone clients
+// render as the node's battery ring and uptime:
+//   Telemetry     { fixed32 time = 1; DeviceMetrics device_metrics = 2; }
+//   DeviceMetrics { uint32 battery_level = 1;       float voltage = 2;
+//                   float channel_utilization = 3;  float air_util_tx = 4;
+//                   uint32 uptime_seconds = 5; }
+//
+// Telemetry.time is fixed32 (wire type 5), the same trap as Position.time — a
+// varint there makes nanopb reject the whole message. Only stamped when the
+// clock is plausibly real; otherwise the receiver uses its RX time.
+//
+// channel_utilization and air_util_tx are deliberately OMITTED. We do have
+// airtime numbers, but they are for the MeshCore channel this node actually
+// repeats on, not the Meshtastic one — publishing them would put a confidently
+// wrong load figure on someone else's network map.
+//
+// Returns the payload length, or 0 if there is nothing worth reporting (no
+// battery sense and no uptime), so the caller can skip the packet entirely.
+inline int buildTelemetryPayload(uint8_t* out, uint16_t batt_mv,
+                                 uint32_t uptime_s, uint32_t time_s) {
+  uint8_t dm[32];
+  int d = 0;
+  int pct = batteryPercent(batt_mv);
+  if (pct >= 0) {
+    d += pbUint32(dm + d, 1, (uint32_t)pct);              // battery_level (%)
+    d += pbFloat(dm + d, 2, (float)batt_mv / 1000.0f);    // voltage
+  }
+  if (uptime_s) d += pbUint32(dm + d, 5, uptime_s);       // uptime_seconds
+  if (d == 0) return 0;
+
+  int n = 0;
+  if (time_s > 1600000000u) n += pbFixed32(out + n, 1, time_s);  // time (fixed32!)
+  n += pbKey(out + n, 2, 2);                              // device_metrics, len-delimited
+  n += pbVarint(out + n, (uint64_t)d);
+  memcpy(out + n, dm, d); n += d;
+  return n;
+}
+
+// ---------------------------------------------------------------------------
+// Transmit outcome + health accounting.
+//
+// These live here, on the dependency-free side, so the bookkeeping and its
+// formatting are host-testable; the code that actually talks to the radio and
+// produces a TxOutcome is radioSendChecked() in MeshtasticBeacon.h.
+// ---------------------------------------------------------------------------
+
+// What actually happened to one transmit. Callers mostly care about the
+// did-it-go-out question (txDelivered); the finer grades exist so a node can
+// say WHY on the console instead of guessing.
+enum TxOutcome : uint8_t {
+  TX_NOT_STARTED,   // the radio refused to begin the transmit
+  TX_IRQ,           // normal path: the TxDone interrupt arrived
+  TX_HW_CONFIRMED,  // interrupt missed, but the chip's TxDone flag is set
+  TX_HW_FAILED,     // interrupt missed AND the chip's TxDone flag is clear
+  TX_PRESUMED,      // interrupt missed, chip can't report -> airtime bound only
+};
+
+inline bool txDelivered(TxOutcome o) {
+  return o == TX_IRQ || o == TX_HW_CONFIRMED || o == TX_PRESUMED;
+}
+inline bool txUsedFallback(TxOutcome o) {   // the TxDone interrupt didn't fire
+  return o == TX_HW_CONFIRMED || o == TX_HW_FAILED || o == TX_PRESUMED;
+}
+
+// Rolling transmit health. RAM only, by design: these are diagnostics for a
+// drive test or a site visit, not something worth a flash write per packet —
+// and a reboot is exactly the moment you want the counters to start over.
+struct TxStats {
+  uint32_t bursts;        // retunes to the Meshtastic channel that transmitted
+  uint32_t lbt_skips;     // bursts abandoned because the channel was busy
+  uint32_t attempts;      // packets handed to the radio
+  uint32_t delivered;     // ... that went out (IRQ, chip-confirmed or presumed)
+  uint32_t irq_missed;    // ... where the TxDone interrupt never arrived
+  uint32_t hw_failed;     // ... and the chip then said it never transmitted
+  uint32_t not_started;   // the radio refused to begin the transmit
+  uint32_t recoveries;    // radio re-inits triggered by a run of dead transmits
+  uint32_t last_fail_ms;  // millis() of the most recent failure (0 = none yet)
+  uint8_t  fail_streak;   // consecutive dead transmits right now
+};
+
+// Fold one transmit outcome into the counters. `now_ms` is millis() (passed in
+// so this stays free of Arduino). Returns the current failure streak, which the
+// caller compares against its recovery threshold.
+inline uint8_t txStatsRecord(TxStats& s, TxOutcome o, uint32_t now_ms) {
+  s.attempts++;
+  if (o == TX_NOT_STARTED) s.not_started++;
+  if (o == TX_HW_FAILED)   s.hw_failed++;
+  if (txUsedFallback(o))   s.irq_missed++;
+  if (txDelivered(o)) {
+    s.delivered++;
+    s.fail_streak = 0;              // proof of life: the run of failures is over
+  } else {
+    if (s.fail_streak < 255) s.fail_streak++;
+    s.last_fail_ms = now_ms ? now_ms : 1;   // never 0 — that means "no failure yet"
+  }
+  return s.fail_streak;
+}
+
+// One-line health summary for the CLI, e.g.
+//   "beacon tx 61/64 ok | dead 3 irq-miss 7 nostart 0 | burst 22 lbt 1 | recov 1 (last fail 12m ago)"
+//
+// Read it as nested, not disjoint: "irq-miss" counts every transmit where the
+// TxDone interrupt never arrived, and "dead" is the subset of those the chip
+// then confirmed had not gone out. irq-miss high with dead 0 is the healthy
+// case — the interrupt path is flaky but the packets are flying.
+//
+// `cap` is the caller's reply buffer size (160 on the MeshCore CLI).
+// `age_ms` is millis() - last_fail_ms; ignored when no failure has happened.
+inline void formatTxStats(char* out, size_t cap, const TxStats& s,
+                          const char* tag, uint32_t age_ms) {
+  char ago[40] = {0};
+  if (s.last_fail_ms) {
+    unsigned long mins = age_ms / 60000UL;
+    if (mins >= 60) snprintf(ago, sizeof(ago), " (last fail %luh ago)", mins / 60);
+    else            snprintf(ago, sizeof(ago), " (last fail %lum ago)", mins);
+  }
+  snprintf(out, cap,
+           "%s tx %lu/%lu ok | dead %lu irq-miss %lu nostart %lu | burst %lu lbt %lu | recov %lu%s",
+           tag,
+           (unsigned long)s.delivered, (unsigned long)s.attempts,
+           (unsigned long)s.hw_failed, (unsigned long)s.irq_missed,
+           (unsigned long)s.not_started,
+           (unsigned long)s.bursts, (unsigned long)s.lbt_skips,
+           (unsigned long)s.recoveries, ago);
 }
 
 } // namespace meshtastic

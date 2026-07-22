@@ -23,10 +23,14 @@ advert** — so the node shows up where you actually left it, on both maps.
 - **Repeat sleep** — parked past `sleep` hours (default 20), the node stops
   repeating until it drives again; a car parked overnight isn't a useful
   mobile repeater.
-- **Home** — `carnode home` stores where the vehicle lives. Parking there
-  turns repeat off immediately and suppresses every broadcast, so the home
-  location never goes on the air.
-- **Self-recovering** — nRF52 boards arm a hardware watchdog (a hung node
+- **Quiet zones** — `carnode zone add <name>` stores a place the vehicle parks
+  often (up to 4: home, work, …). Parking in one turns repeat off immediately
+  and suppresses every broadcast, so that location never goes on the air.
+- **Battery on the map** — each burst carries Meshtastic telemetry, so a car
+  parked for days shows its charge draining in any Meshtastic client.
+- **Self-recovering** — the radio re-initialises itself after a run of
+  transmits the chip reports as dead, and `mtbeacon stats` shows the running
+  transmit health. nRF52 boards also arm a hardware watchdog (a hung node
   reboots itself) and answer `get pwrmgt.bootreason` with why they last reset.
 
 Everything is runtime-configurable over serial or an admin remote-CLI session

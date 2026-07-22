@@ -88,6 +88,59 @@ Use `txDelivered(r)` for the did-it-go-out question and `txUsedFallback(r)` for
 the ISR-health one. The register read must precede `onSendFinished()`, whose
 `finishTransmit()` clears the IRQ flags.
 
+These three (`TxOutcome`, `txDelivered`, `txUsedFallback`) live in
+`MeshtasticProto.h`, not `MeshtasticBeacon.h`, so the bookkeeping below is
+host-testable.
+
+### 4b. Transmit health and self-repair (v0.2.6)
+
+Feed each outcome to `txStatsRecord(stats, r, millis())`. It updates a `TxStats`
+and returns the current **failure streak**; when that reaches
+`MT_BEACON_FAIL_STREAK` (default 3, `-D`-overridable), call `radioRecover()`
+*instead of* `radioRestoreMeshCore()` at the end of the burst:
+
+```cpp
+meshtastic::TxOutcome r = meshtastic::radioSendChecked(driver, radio, pkt, len);
+if (meshtastic::txStatsRecord(tx, r, millis()) >= MT_BEACON_FAIL_STREAK)
+  wedged = true;
+...
+if (wedged) {
+  tx.recoveries++;
+  tx.fail_streak = 0;                       // give the re-init a clean run
+  meshtastic::radioRecover(driver, radio, /* same home_* args as restore */);
+} else {
+  meshtastic::radioRestoreMeshCore(driver, radio, /* ... */);
+}
+```
+
+`radioRecover()` is `radioRestoreMeshCore()` plus, first: `standby()`,
+`clearIrqFlags(0xFFFFFFFF)` and `driver.begin()`. That last call is the point of
+the exercise — `RadioLibWrapper::begin()` re-registers the TxDone interrupt
+action, which is the thing most likely to have been lost across a retune. It
+deliberately stops short of a chip reset (that needs per-family `begin()`
+parameters the wrapper doesn't expose). Side effect: `begin()` restarts
+noise-floor calibration.
+
+`formatTxStats(out, cap, stats, tag, millis() - stats.last_fail_ms)` renders the
+one-line CLI summary. Note the counters nest: `irq_missed` counts every transmit
+whose interrupt never arrived, and `hw_failed` is the subset the chip confirmed
+never went out.
+
+### 4c. Telemetry — battery and uptime (v0.2.6)
+
+`buildTelemetryPayload(out, batt_mv, uptime_s, epoch)` encodes a Meshtastic
+`Telemetry{DeviceMetrics}` for `PORT_TELEMETRY` (67). Supply the two new
+`Context` fields from the repeater:
+
+```cpp
+ctx.batt_millivolts = board.getBattMilliVolts();   // 0 if no battery sense
+ctx.uptime_secs     = (uint32_t)(uptime_millis / 1000);
+```
+
+It returns 0 when there is nothing measurable to report, so the caller skips the
+packet entirely rather than broadcasting an empty submessage. `Telemetry.time`
+is `fixed32`, the same nanopb trap as `Position.time`.
+
 ### 5. Flood-advert events — the chat text pacing (v0.2.3)
 
 Both places the repeater floods a MeshCore advert notify the beacon, so the

@@ -152,23 +152,8 @@ void radioEnterMeshtastic(DriverT& driver, RadioT& radio,
   driver.setTxPower(tx_power);
 }
 
-// What actually happened to one transmit. Callers mostly care about the
-// did-it-go-out question (txDelivered); the finer grades exist so a node can
-// say WHY on the console instead of guessing.
-enum TxOutcome : uint8_t {
-  TX_NOT_STARTED,   // the radio refused to begin the transmit
-  TX_IRQ,           // normal path: the TxDone interrupt arrived
-  TX_HW_CONFIRMED,  // interrupt missed, but the chip's TxDone flag is set
-  TX_HW_FAILED,     // interrupt missed AND the chip's TxDone flag is clear
-  TX_PRESUMED,      // interrupt missed, chip can't report -> airtime bound only
-};
-
-inline bool txDelivered(TxOutcome o) {
-  return o == TX_IRQ || o == TX_HW_CONFIRMED || o == TX_PRESUMED;
-}
-inline bool txUsedFallback(TxOutcome o) {   // the TxDone interrupt didn't fire
-  return o == TX_HW_CONFIRMED || o == TX_HW_FAILED || o == TX_PRESUMED;
-}
+// TxOutcome / txDelivered() / txUsedFallback() and the TxStats bookkeeping they
+// feed live in MeshtasticProto.h, so the accounting can be host-tested.
 
 // Send one raw packet while already tuned; cooperates with the TX state machine.
 //
@@ -219,6 +204,36 @@ void radioRestoreMeshCore(DriverT& driver, RadioT& radio,
   driver.startRecv();   // re-arm RX now; otherwise the radio sits in standby until
                         // the next recvRaw(), and under powersaving the node can
                         // sleep first and stay deaf for a whole wake interval.
+}
+
+// Unwedge a transmitter that has stopped transmitting.
+//
+// radioSendChecked() can now report TX_HW_FAILED: the chip's own TxDone flag was
+// still CLEAR after the packet's entire airtime had elapsed, so it genuinely
+// never went out. One of those is bad luck. Several in a row means the modem —
+// or the DIO1 interrupt the driver waits on — is stuck, and every later beacon
+// fails the same silent way until somebody power-cycles the node. That is worth
+// acting on, and until now we only printed it.
+//
+// Recovery re-issues the whole configuration instead of resetting the chip:
+// standby, drop any latched IRQ flags, re-arm the driver (RadioLibWrapper::begin
+// re-registers the TxDone interrupt action, which is the thing most likely to
+// have been lost across a retune), then reprogram the MeshCore PHY and re-enter
+// RX. A hardware reset would need the per-family begin() parameters the wrapper
+// doesn't expose, and a half-reset radio is worse than the wedge we're clearing.
+//
+// Side effect worth knowing: driver.begin() restarts the noise-floor
+// calibration, so the interference threshold is re-learned over the next few
+// seconds. That is a fair price for a radio that transmits again.
+template <class DriverT, class RadioT>
+void radioRecover(DriverT& driver, RadioT& radio,
+                  float home_freq, float home_bw, uint8_t home_sf,
+                  uint8_t home_cr, uint8_t home_sync, int8_t home_tx_power) {
+  radio.standby();
+  radio.clearIrqFlags(0xFFFFFFFFu);   // best-effort; UNSUPPORTED on families that can't
+  driver.begin();                     // re-attach the TxDone ISR, reset the driver state
+  radioRestoreMeshCore(driver, radio, home_freq, home_bw, home_sf, home_cr,
+                       home_sync, home_tx_power);
 }
 
 // Retune to Meshtastic, transmit one raw packet, restore the MeshCore PHY.

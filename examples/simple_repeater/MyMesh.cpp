@@ -1394,6 +1394,8 @@ void MyMesh::loop() {
     ctx.lon = _prefs.node_lon;
     ctx.epoch = getRTCClock()->getCurrentTime();
     ctx.flood_advert_hours = _prefs.flood_advert_interval;   // paces the chat text
+    ctx.batt_millivolts = board.getBattMilliVolts();         // Telemetry: battery
+    ctx.uptime_secs = (uint32_t)(uptime_millis / 1000);      // Telemetry: uptime
     ctx.home_freq = _prefs.freq; ctx.home_bw = _prefs.bw;
     ctx.home_sf = _prefs.sf;     ctx.home_cr = _prefs.cr;
     ctx.home_sync = MESHCORE_SYNC_WORD;
@@ -1427,6 +1429,8 @@ void MyMesh::loop() {
     }
     ctx.epoch = getRTCClock()->getCurrentTime();
     ctx.flood_advert_hours = _prefs.flood_advert_interval;   // paces the chat text
+    ctx.batt_millivolts = board.getBattMilliVolts();         // Telemetry: battery
+    ctx.uptime_secs = (uint32_t)(uptime_millis / 1000);      // Telemetry: uptime
     ctx.home_freq = _prefs.freq; ctx.home_bw = _prefs.bw;
     ctx.home_sf = _prefs.sf;     ctx.home_cr = _prefs.cr;
     ctx.home_sync = MESHCORE_SYNC_WORD;

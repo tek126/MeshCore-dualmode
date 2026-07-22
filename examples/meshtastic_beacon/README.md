@@ -101,6 +101,7 @@ Then, over serial or via an admin remote-CLI session, use the `mtbeacon` verbs:
 | Command | Effect |
 | --- | --- |
 | `mtbeacon` / `mtbeacon status` | show current config + derived node id |
+| `mtbeacon stats` / `mtbeacon stats clear` | transmit health since boot / reset the counters |
 | `mtbeacon help` | list all commands (detailed list prints to serial) |
 | `mtbeacon on` / `mtbeacon off` | enable / disable periodic beaconing |
 | `mtbeacon send` | transmit one beacon now, text included (works even when off) |
@@ -115,14 +116,28 @@ Then, over serial or via an admin remote-CLI session, use the `mtbeacon` verbs:
 | `mtbeacon short <str\|auto>` | Meshtastic short name / map label (≤4 chars); `auto` = `MC` + 2 hex |
 | `mtbeacon nodeinfo on/off` | also emit a NodeInfo (named node) — default on |
 | `mtbeacon position on/off` | also emit a Position (map pin) — default on |
+| `mtbeacon telemetry on/off` | also emit Telemetry (battery + uptime) — default on |
 | `mtbeacon presets` / `mtbeacon regions` | list available preset / region names |
 
 **Shows up as a node on the Meshtastic map.** The periodic beacon is a silent
 *presence*: a **NodeInfo** (so the repeater appears as a named node — long name
-`MC <repeater name>`, short name `MC` + 2 hex of the node id, e.g. `MC7a`) and a
+`MC <repeater name>`, short name `MC` + 2 hex of the node id, e.g. `MC7a`), a
 **Position** (a map pin, using the repeater's configured lat/lon; skipped if
-unset). At slow presets the two alternate, one per cycle, to bound the
-off-channel window. Toggle them with `nodeinfo`/`position`.
+unset), and a **Telemetry** packet (battery + uptime). At slow presets these
+go out one per cycle, round-robin, to bound the off-channel window; only the
+enabled ones take part, so switching one off speeds up the rest of the cycle.
+Toggle them with `nodeinfo` / `position` / `telemetry`.
+
+**Battery and uptime (v0.2.6).** The Telemetry packet carries Meshtastic
+`DeviceMetrics`, which is what phone clients render as the node's battery ring
+and uptime — so a solar or battery repeater shows its state of charge on someone
+else's app without any extra hardware. The percentage is mapped from the board's
+raw millivolt reading across the usual 1S Li-ion range (3.3 V empty → 4.2 V
+full); boards with no battery sense report nothing at all rather than a
+confident 0%. `channel_utilization` and `air_util_tx` are deliberately **left
+empty**: our airtime figures describe the MeshCore channel this node actually
+repeats on, not the Meshtastic one, and publishing them would put a confidently
+wrong load number on someone else's network map.
 
 The **short name is the label Meshtastic draws on the map marker**, which is why
 it isn't a flat `MC` — that would make every beacon an indistinguishable pin.
@@ -204,6 +219,43 @@ beacon: 1/2 packet(s) did NOT transmit (chip reports no TxDone)
 
 A burst reports failure only when nothing left the antenna — the caller then
 retries it rather than recording a delivery that never happened.
+
+### Self-repair and `mtbeacon stats` (v0.2.6)
+
+Knowing a transmit is genuinely dead is only useful if something acts on it.
+After **3 dead transmits in a row** (`MT_BEACON_FAIL_STREAK`, overridable by
+`-D`) the beacon **re-initialises the radio** instead of merely restoring it:
+standby, clear any latched IRQ flags, re-arm the driver — which re-registers the
+TxDone interrupt action, the thing most likely to have been lost across a retune
+— then reprogram the MeshCore PHY and re-enter receive. Before this, a wedged
+modem stayed wedged until somebody power-cycled the node.
+
+It deliberately stops short of a chip reset: that needs per-family `begin()`
+parameters the wrapper doesn't expose, and a half-reset radio is worse than the
+wedge being cleared. A recovery restarts noise-floor calibration, so the
+interference threshold is re-learned over the next few seconds.
+
+```
+beacon: 3 dead transmits in a row - reinitialising the radio
+```
+
+The counters behind all of this are readable at any time, which turns a drive
+test or a site visit into data instead of serial scrollback:
+
+```
+mtbeacon stats
+> beacon tx 61/64 ok | dead 3 irq-miss 7 nostart 0 | burst 22 lbt 1 | recov 1 (last fail 12m ago)
+```
+
+Read `dead` and `irq-miss` as **nested, not disjoint**: `irq-miss` counts every
+transmit where the TxDone interrupt never arrived, and `dead` is the subset the
+chip then confirmed had not gone out. A high `irq-miss` with `dead 0` is the
+healthy case — the interrupt path is flaky but the packets are flying, which is
+exactly the situation v0.2.4 could not distinguish from failure. `lbt` counts
+bursts skipped because listen-before-talk found the channel busy; `recov` counts
+radio re-inits. The counters live in RAM only — they are diagnostics, not worth
+a flash write per packet, and a reboot is exactly when you want them to reset.
+`mtbeacon stats clear` zeroes them without rebooting.
 
 ### nRF52 boards
 

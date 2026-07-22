@@ -115,20 +115,24 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 | `mtbeacon short <str\|auto>` | Meshtastic short name / map label (≤4 chars); `auto` = `MC` + 2 hex |
 | `mtbeacon nodeinfo on/off` | include NodeInfo (named node) — default on |
 | `mtbeacon position on/off` | include Position (live map pin) — default on |
+| `mtbeacon telemetry on/off` | include Telemetry (battery + uptime) — default on |
+| `mtbeacon stats` / `mtbeacon stats clear` | transmit health since boot / reset the counters |
 | `mtbeacon presets` / `mtbeacon regions` | list available values |
 
 **`carnode`** — the car-specific park behaviour:
 
 | Command | Effect |
 | --- | --- |
-| `carnode` / `carnode status` | show drive state (nofix/driving/parked/sleeping/home) + park config |
+| `carnode` / `carnode status` | show drive state (nofix/driving/parked/sleeping/*zone*) + park config |
 | `carnode park <sec>` | stopped time before an update fires (30–86400, default 300) |
 | `carnode radius <m>` | movement within this counts as "stopped" (5–2000, default 30) |
 | `carnode advertdelay <sec>` | gap from the Meshtastic burst to the MeshCore advert (0–600, default 10) |
 | `carnode sleep <hours>` | parked this long → stop repeating until driving again (0–720, 0 = never, default 20) |
-| `carnode home` | set home = the current spot; parking at home → repeat off immediately, radio quiet |
-| `carnode home clear` | forget the home location |
-| `carnode home radius <m>` | how close to home counts as home (5–2000, default 100) |
+| `carnode zone` | list the quiet zones (up to 4) |
+| `carnode zone add <name>` | quiet zone = the current spot; parking in it → repeat off immediately, radio quiet |
+| `carnode zone del <name>` | forget that zone |
+| `carnode zone radius <name> <m>` | how close to it counts (5–2000, default 100) |
+| `carnode home [clear\|radius <m>]` | shorthand for the zone named `home` |
 
 **Park model.** The node watches its GPS fix. While the position keeps moving
 outside `radius` metres, it's *driving* and sends no location. Once the fix sits
@@ -173,8 +177,8 @@ seconds later. So each *new-spot* park announces itself in chat, and running
 `advert` doubles as a live test. (`text.mult > 1` adds timer-paced extras
 between adverts; `text.mult 0` disables the text entirely.) `mtbeacon status`
 shows the pacing live, e.g. `txt1x~47h(due 13h)` — or `(due now)` when a text
-is armed and waiting for the next burst. At home, nothing transmits; an armed
-text just stays pending until you drive away.
+is armed and waiting for the next burst. In a quiet zone nothing transmits; an
+armed text just stays pending until you drive away.
 
 **Hop limit.** Meshtastic packets go out at `hops 0` by default — heard by
 direct neighbors, never rebroadcast. A car node is mobile and transmits from
@@ -203,7 +207,38 @@ carnode: TxDone IRQ missed on 1/3 packet(s) - checked the chip instead
 carnode: 1/3 packet(s) did NOT transmit (chip reports no TxDone)
 ```
 
-(mtbeacon v0.2.4 bounded the wait; v0.2.5 added the hardware check.)
+After **3 dead transmits in a row** the node stops merely reporting it and
+**re-initialises the radio** — standby, clear latched IRQ flags, re-arm the
+driver's TxDone interrupt, reprogram the MeshCore PHY, re-enter receive. A car
+node that has silently stopped transmitting is a car you can't find, and before
+this a wedged modem stayed wedged until the ignition cycled.
+
+```
+carnode: 3 dead transmits in a row - reinitialising the radio
+```
+
+`mtbeacon stats` reports the running totals, which is what makes a drive test
+readable afterwards instead of a scroll through serial output:
+
+```
+mtbeacon stats
+> carnode tx 61/64 ok | dead 3 irq-miss 7 nostart 0 | burst 22 lbt 1 | recov 1 (last fail 12m ago)
+```
+
+`dead` nests inside `irq-miss`: `irq-miss` is every transmit whose interrupt
+never arrived, `dead` the subset the chip confirmed never went out. High
+`irq-miss` with `dead 0` is healthy — flaky interrupts, packets still flying.
+The counters are RAM-only (a reboot resets them); `mtbeacon stats clear` zeroes
+them on demand.
+
+(mtbeacon v0.2.4 bounded the wait; v0.2.5 added the hardware check; v0.2.6
+added the recovery and the counters.)
+
+**Battery reporting.** Each park burst — and the periodic presence — carries a
+Meshtastic **Telemetry** packet with the board's battery percentage, voltage and
+uptime, so a car parked for three days shows its charge draining in any
+Meshtastic client. Turn it off with `mtbeacon telemetry off`. Boards with no
+battery sense report nothing rather than a misleading 0%.
 
 > The MeshCore side relies on `advert_loc_policy = prefs` (the repeater default),
 > which this build keeps. The car node writes the fix into prefs itself rather
@@ -221,22 +256,35 @@ Losing the GPS fix while parked (underground garage) does *not* wake it; only
 movement does. The sleep toggle is not persisted: a reboot starts awake, and
 `carnode sleep 0` disables the feature.
 
-**Home.** Park where the vehicle usually lives and say `carnode home` — the node
-stores the current (median-filtered) spot as *home*, persisted in `/carnode`.
-From then on, parking within `home radius` metres of it (default 100) turns
-**repeat off** immediately — no waiting for the `sleep` timer — on the logic that
-home already has fixed coverage and doesn't need a mobile repeater idling in the
-driveway. While at home the node also goes **radio-quiet**: the park burst, the
-MeshCore re-advert, *and* the periodic presence are all suppressed, so the home
-location is never put on the air (an explicit `carnode send` still transmits if
-you ask for it). Driving away restores repeat and the normal beacon behaviour,
-exactly like waking from sleep. Losing the fix at home (garage) keeps it home;
-only driving away clears it. `carnode home clear` forgets the location.
+**Quiet zones.** Park where the vehicle usually lives and say
+`carnode zone add home` — the node stores the current (median-filtered) spot
+under that name, persisted in `/carnode`. From then on, parking within the
+zone's radius (default 100 m) turns **repeat off** immediately — no waiting for
+the `sleep` timer — on the logic that a place you park at every day already has
+fixed coverage and doesn't need a mobile repeater idling in the driveway. Inside
+a zone the node also goes **radio-quiet**: the park burst, the MeshCore
+re-advert, *and* the periodic presence are all suppressed, so that location is
+never put on the air (an explicit `carnode send` still transmits if you ask for
+it). Driving away restores repeat and the normal beacon behaviour, exactly like
+waking from sleep. Losing the fix inside a zone (garage) keeps you in it; only
+driving away clears it.
+
+Up to **4 zones** can be stored — home, work, a regular customer site — each
+with its own radius. `carnode zone` lists them and marks the one you're sitting
+in with `*`; `carnode status` and the OLED show the zone's *name* as the state,
+so "which of my places is it at" is answerable at a glance. Names are up to 8
+characters. Re-running `carnode zone add <name>` for an existing name moves that
+zone to where you are now, keeping its radius.
+
+`carnode home`, `carnode home clear` and `carnode home radius <m>` still work —
+they are shorthand for the zone named `home`, so nothing an existing operator
+typed before v0.2.6 has changed. A home set on an older build is **migrated into
+the zone table automatically** on first boot, keeping its radius.
 
 Defaults: US LongFast, 5-min park / 30 m radius, 30-min presence, 22 dBm
-(region-capped), 20 h repeat sleep, no home until set, disabled until
+(region-capped), 20 h repeat sleep, no zones until set, disabled until
 `mtbeacon on`. The OLED home screen shows `CarNode driving` / `parked` /
-`sleeping` / `home`.
+`sleeping` / `<zone name>`.
 
 ## Reliability (nRF52 boards)
 

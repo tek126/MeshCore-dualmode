@@ -97,6 +97,75 @@ int main() {
   resolveShortName(sn, "TOOLONG", 0x12abcdef);
   CHECK(strcmp(sn, "TOOL") == 0);                       // truncated to 4, terminated
 
+  printf("battery percent (1S Li-ion, 3.3-4.2 V):\n");
+  CHECK(batteryPercent(0)    == -1);                    // no battery sense -> omit the field
+  CHECK(batteryPercent(3300) == 0);
+  CHECK(batteryPercent(4200) == 100);
+  CHECK(batteryPercent(3750) == 50);
+  CHECK(batteryPercent(2500) == 0);                     // clamped, never negative
+  CHECK(batteryPercent(5000) == 100);                   // clamped, never over 100
+
+  printf("telemetry payload (DeviceMetrics):\n");
+  uint8_t tp[64];
+  int tn = buildTelemetryPayload(tp, 3750, 86400, 1751299200u);
+  // Telemetry.time is field 1 FIXED32 (wt5) — a varint here voids the message,
+  // exactly like Position.time.
+  CHECK(tp[0] == 0x0d);
+  uint32_t tt; memcpy(&tt, tp + 1, 4);
+  CHECK(tt == 1751299200u);
+  CHECK(tp[5] == 0x12);                                 // field 2 device_metrics, len-delimited
+  int dlen = tp[6];
+  CHECK(tn == 7 + dlen);                                // the submessage length is honest
+  const uint8_t* dm = tp + 7;
+  CHECK(dm[0] == 0x08 && dm[1] == 50);                  // field1 battery_level = 50%
+  CHECK(dm[2] == 0x15);                                 // field2 voltage, FLOAT (wt5)
+  float volts; memcpy(&volts, dm + 3, 4);
+  CHECK(near(volts, 3.75f));
+  CHECK(dm[7] == 0x28);                                 // field5 uptime_seconds, varint
+  // no clock yet -> time omitted, but the metrics still go out
+  int tn2 = buildTelemetryPayload(tp, 3750, 100, 0);
+  CHECK(tp[0] == 0x12 && tn2 < tn);
+  // nothing measurable at all -> caller should skip the packet entirely
+  CHECK(buildTelemetryPayload(tp, 0, 0, 1751299200u) == 0);
+  // no battery sense but a known uptime -> uptime only
+  int tn3 = buildTelemetryPayload(tp, 0, 3600, 0);
+  CHECK(tn3 > 0 && tp[2] == 0x28);
+
+  printf("tx health accounting:\n");
+  TxStats s = {};
+  CHECK(txStatsRecord(s, TX_IRQ, 1000) == 0);           // clean send: no streak
+  CHECK(s.delivered == 1 && s.attempts == 1 && s.irq_missed == 0);
+  txStatsRecord(s, TX_HW_CONFIRMED, 2000);              // IRQ lost, chip says it went
+  CHECK(s.delivered == 2 && s.irq_missed == 1 && s.hw_failed == 0 && s.fail_streak == 0);
+  txStatsRecord(s, TX_PRESUMED, 3000);                  // chip can't tell -> still counts as sent
+  CHECK(s.delivered == 3 && s.irq_missed == 2 && s.fail_streak == 0);
+  CHECK(txStatsRecord(s, TX_HW_FAILED, 4000) == 1);     // chip says it never transmitted
+  CHECK(txStatsRecord(s, TX_HW_FAILED, 5000) == 2);
+  CHECK(s.hw_failed == 2 && s.delivered == 3 && s.last_fail_ms == 5000);
+  // "dead" nests inside "irq-miss": a HW_FAILED transmit is one where the
+  // interrupt never arrived AND the chip then said nothing went out.
+  CHECK(s.irq_missed == 4);
+  CHECK(txStatsRecord(s, TX_NOT_STARTED, 6000) == 3);   // a refused start extends the streak
+  CHECK(s.not_started == 1 && s.irq_missed == 4);       // ... but never began, so not an IRQ miss
+  CHECK(txStatsRecord(s, TX_IRQ, 7000) == 0);           // one good send clears the streak
+  CHECK(s.last_fail_ms == 6000);                        // ... but the last failure is remembered
+  // a failure at millis()==0 must not read back as "never failed"
+  TxStats z = {};
+  txStatsRecord(z, TX_HW_FAILED, 0);
+  CHECK(z.last_fail_ms != 0);
+
+  printf("tx health formatting:\n");
+  char line[160];
+  formatTxStats(line, sizeof(line), s, "beacon", 90u * 60000u);
+  CHECK(strstr(line, "beacon tx 4/7 ok") != nullptr);
+  CHECK(strstr(line, "dead 2 irq-miss 4 nostart 1") != nullptr);
+  CHECK(strstr(line, "(last fail 1h ago)") != nullptr);
+  TxStats fresh = {};
+  formatTxStats(line, sizeof(line), fresh, "carnode", 0);
+  CHECK(strstr(line, "carnode tx 0/0 ok") != nullptr);
+  CHECK(strstr(line, "last fail") == nullptr);          // no failure yet -> no age clause
+  CHECK(strlen(line) < 160);
+
   printf(failures ? "\nFAILED: %d check(s)\n" : "\nAll checks passed.\n", failures);
   return failures ? 1 : 0;
 }
