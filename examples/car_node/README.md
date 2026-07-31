@@ -67,8 +67,11 @@ lib_deps = ${env:heltec_v4_repeater.lib_deps}
 To add another board, copy that shape onto its `*_repeater` env: set
 `MT_HW_MODEL` to the board's Meshtastic HardwareModel, add `-D ENV_INCLUDE_GPS=1`
 if its base doesn't already, and make sure the variant constructs a GPS
-`LocationProvider` (and declares `extern MomentaryButton user_btn;` if you want
-hold-to-hibernate).
+`LocationProvider` **passing `&rtc_clock`** — e.g.
+`MicroNMEALocationProvider(Serial1, &rtc_clock)`. The clock pointer is what lets
+GPS set the time: the map-pin and telemetry timestamps come from the RTC, and
+on a board with no hardware RTC that clock is wrong until the first fix syncs it.
+(Also declare `extern MomentaryButton user_btn;` if you want hold-to-hibernate.)
 
 ## Hibernate: hold the user button (~3 s)
 

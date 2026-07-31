@@ -77,7 +77,7 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "22 Jul 2026"
+  #define FIRMWARE_BUILD_DATE   "31 Jul 2026"
 #endif
 
 // Fallbacks only: the *_carnode envs override FIRMWARE_VERSION with the git
@@ -88,7 +88,7 @@ struct NeighbourInfo {
   #ifdef WITH_MT_BEACON
     #define FIRMWARE_VERSION   "v1.16.0+mtbeacon-0.2.6"
   #elif defined(WITH_CAR_NODE)
-    #define FIRMWARE_VERSION   "v1.16.0+carnode-0.2.7"
+    #define FIRMWARE_VERSION   "v1.16.0+carnode-0.2.8"
   #else
     #define FIRMWARE_VERSION   "v1.16.0"
   #endif
