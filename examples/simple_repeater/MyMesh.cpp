@@ -433,6 +433,16 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
   if (repeatDisabled()) return false;
+  // Operator-configured channel blocklist: group text/data carry the 1-byte
+  // channel hash at payload[0]. Drop (don't repeat) any that match a `block`ed
+  // #channel. Other payload types have no channel hash and are unaffected.
+  {
+    uint8_t t = packet->getPayloadType();
+    if ((t == PAYLOAD_TYPE_GRP_TXT || t == PAYLOAD_TYPE_GRP_DATA)
+        && packet->payload_len >= 1 && _blocker.isBlocked(packet->payload[0])) {
+      return false;
+    }
+  }
   if (packet->isRouteFlood()) {
     if (packet->getPathHashCount() >= _prefs.flood_max) return false;
     if (packet->getRouteType() == ROUTE_TYPE_FLOOD && packet->getPathHashCount() >= _prefs.flood_max_unscoped) return false;
@@ -939,6 +949,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
   acl.load(_fs, self_id);
+  _blocker.begin(_fs);
 
 #ifdef WITH_MT_BEACON
   // Derive a stable Meshtastic node number + starting packet id from our pubkey.
@@ -1320,6 +1331,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+  } else if (_blocker.handleCommand(command, reply, _fs)) {
+    // handled by the channel blocklist ("block ..." / "unblock ..." verbs)
 #ifdef WITH_MT_BEACON
   } else if (_beacon.handleCommand(command, reply, _fs)) {
     // handled by the Meshtastic beacon ("mtbeacon ..." verbs)

@@ -137,6 +137,24 @@ two verbs — one underlying beacon engine, no duplicate transmitters:
 | `carnode zone radius <name> <m>` | how close to it counts (5–2000, default 100) |
 | `carnode home [clear\|radius <m>]` | shorthand for the zone named `home` |
 
+**`block`** — channels this repeater refuses to repeat (a generic repeater
+feature, present in every build, not car-specific):
+
+| Command | Effect |
+| --- | --- |
+| `block` / `block list` | list the blocked channels + their derived hash byte |
+| `block #dispatches` | stop repeating that `#hashtag` channel (up to 8) |
+| `unblock #dispatches` | resume repeating it |
+
+MeshCore `#hashtag` channels derive their key from the name
+(`SHA-256("#name")[:16]`), so the firmware computes the on-air channel hash
+itself — you just type the name, no key needed. Two limits are inherent to the
+wire format: it only works for `#`-named channels (a private channel with a
+random key isn't derivable from its name), and the on-wire channel id is a
+single byte, so a block occasionally also catches an unrelated channel sharing
+that byte (~1 in 256 — the listed hash makes a collision diagnosable). Non-group
+traffic (adverts, DMs, ACKs) is never affected.
+
 **Park model.** The node watches its GPS fix. While the position keeps moving
 outside `radius` metres, it's *driving* and sends no location. Once the fix sits
 within `radius` for `park` seconds (default 5 min), the vehicle is *parked* and a

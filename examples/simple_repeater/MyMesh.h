@@ -34,6 +34,7 @@
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/RegionMap.h>
 #include "RateLimiter.h"
+#include "ChannelBlocker.h"
 
 #ifdef WITH_MT_BEACON
 #include "MtBeaconControl.h"   // -I examples/meshtastic_beacon
@@ -77,7 +78,7 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "31 Jul 2026"
+  #define FIRMWARE_BUILD_DATE   "2 Aug 2026"
 #endif
 
 // Fallbacks only: the *_carnode envs override FIRMWARE_VERSION with the git
@@ -86,9 +87,9 @@ struct NeighbourInfo {
 // still reports something truthful.
 #ifndef FIRMWARE_VERSION
   #ifdef WITH_MT_BEACON
-    #define FIRMWARE_VERSION   "v1.16.0+mtbeacon-0.2.6"
+    #define FIRMWARE_VERSION   "v1.16.0+mtbeacon-0.2.7"
   #elif defined(WITH_CAR_NODE)
-    #define FIRMWARE_VERSION   "v1.16.0+carnode-0.2.8"
+    #define FIRMWARE_VERSION   "v1.16.0+carnode-0.2.9"
   #else
     #define FIRMWARE_VERSION   "v1.16.0"
   #endif
@@ -107,6 +108,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   NodePrefs _prefs;
   ClientACL  acl;
   CommonCLI _cli;
+  ChannelBlocker _blocker;   // #channels this repeater is configured not to repeat
 #ifdef WITH_MT_BEACON
   MtBeaconControl _beacon;
 #endif
