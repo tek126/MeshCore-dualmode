@@ -185,17 +185,50 @@ inline void resolveShortName(char out[5], const char* configured, uint32_t node_
 // Meshtastic Position message: latitude_i, longitude_i (1e-7 deg), time, precision.
 // NOTE: Position.time is fixed32 (wire type 5) in mesh.proto, NOT a varint — a
 // varint here makes nanopb reject the whole message, so the pin never shows.
-inline int buildPositionPayload(uint8_t* out, double lat, double lon, uint32_t time_s) {
+//
+// precision_bits is Meshtastic's per-channel "position precision": 32 = exact pin;
+// lower values mask off the low bits of lat/lon so receivers draw an uncertainty
+// CIRCLE instead of a point (13 ~= 2.9 km, 16 ~= 364 m, 19 ~= 45 m). This mirrors
+// the Meshtastic firmware's computeImpreciseLatLon() byte-for-byte: keep the top
+// `precision_bits`, then add a half-cell offset so the fuzzed fix sits in the
+// centre of the cell rather than its corner. Callers wanting an exact pin can omit
+// the argument (defaults to 32). 0 would zero the location out entirely, so callers
+// treat 0 as "send no Position at all" and never reach here with it.
+inline int buildPositionPayload(uint8_t* out, double lat, double lon, uint32_t time_s,
+                                uint8_t precision_bits = 32) {
   int32_t lat_i = (int32_t)(lat * 1e7 + (lat < 0 ? -0.5 : 0.5));
   int32_t lon_i = (int32_t)(lon * 1e7 + (lon < 0 ? -0.5 : 0.5));
+  if (precision_bits > 32) precision_bits = 32;
+  if (precision_bits < 32) {                 // obfuscate: keep only the top bits
+    uint32_t mask = (precision_bits == 0) ? 0u : (0xFFFFFFFFu << (32 - precision_bits));
+    uint32_t lu = (uint32_t)lat_i & mask;
+    uint32_t nu = (uint32_t)lon_i & mask;
+    if (precision_bits > 0) {                // centre the fix within the reduced cell
+      uint32_t off = 1u << (31 - precision_bits);
+      lu += off; nu += off;
+    }
+    lat_i = (int32_t)lu; lon_i = (int32_t)nu;
+  }
   int n = 0;
   n += pbSfixed32(out + n, 1, lat_i);     // latitude_i  (sfixed32)
   n += pbSfixed32(out + n, 2, lon_i);     // longitude_i (sfixed32)
   // Only stamp time if the clock is plausibly real (> 2020-09); otherwise omit
   // it and let the receiver use its RX time, rather than claim a 1970 fix.
   if (time_s > 1600000000u) n += pbFixed32(out + n, 4, time_s);  // time (fixed32!)
-  n += pbUint32(out + n, 23, 32);         // precision_bits (field 23!) = full -> map pin
+  n += pbUint32(out + n, 23, precision_bits);   // precision_bits (field 23) -> circle/pin
   return n;
+}
+
+// Human-readable radius for a precision_bits value, matching the labels the
+// Meshtastic apps show in their position-precision picker. Handy for CLI echoes.
+inline const char* precisionLabel(uint8_t bits) {
+  switch (bits) {
+    case 10: return "~23 km";  case 11: return "~12 km";  case 12: return "~5.8 km";
+    case 13: return "~2.9 km"; case 14: return "~1.5 km"; case 15: return "~730 m";
+    case 16: return "~360 m";  case 17: return "~180 m";  case 18: return "~90 m";
+    case 19: return "~45 m";
+    default: return (bits >= 32) ? "exact" : (bits >= 20 ? "<45 m" : ">23 km");
+  }
 }
 
 // Meshtastic DeviceMetrics.battery_level is a PERCENTAGE, but a MeshCore board

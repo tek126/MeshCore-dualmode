@@ -40,6 +40,14 @@
   #define MT_BEACON_FAIL_STREAK 3
 #endif
 
+// Default Meshtastic position precision when a *presence* build (companion) first
+// shares its location: 13 bits ~= a 2.9 km circle — "this node lives in this town"
+// without pinning a street. A fixed repeater ships exact (32) instead; see
+// setDefaults(). Range is 0 (no location) or 10..32 (32 = exact pin).
+#ifndef MT_PRESENCE_DEFAULT_PRECISION
+  #define MT_PRESENCE_DEFAULT_PRECISION 13
+#endif
+
 class MtBeaconControl {
 public:
   struct Config {
@@ -68,6 +76,10 @@ public:
     char     short_name[5];
     // v7: emit Telemetry/DeviceMetrics (battery + uptime) with the presence.
     uint8_t  send_telemetry;
+    // v8: Meshtastic position precision (bits). 32 = exact pin, 10..31 fuzz the
+    // fix into an uncertainty circle, 0 = suppress Position entirely. Appended
+    // last so older files migrate in place (see load()).
+    uint8_t  pos_precision;
   };
 
   // Live per-send context the repeater supplies each tick (name/location/clock,
@@ -85,7 +97,8 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC    = 0x3742544DUL;  // 'MTB7' (bumped: added send_telemetry)
+  static const uint32_t MAGIC    = 0x3842544DUL;  // 'MTB8' (bumped: added pos_precision)
+  static const uint32_t MAGIC_V7 = 0x3742544DUL;  // 'MTB7' (+send_telemetry; migrated on load)
   static const uint32_t MAGIC_V6 = 0x3642544DUL;  // 'MTB6' (+short_name; migrated on load)
   static const uint32_t MAGIC_V5 = 0x3542544DUL;  // 'MTB5' (+hop_limit; migrated on load)
 
@@ -120,7 +133,15 @@ private:
     cfg.send_position = 1;
     cfg.send_telemetry = 1;    // battery + uptime: small, and it fills the node's battery ring
     cfg.hop_limit = 0;         // 0 hops: heard by direct neighbors, never rebroadcast
+#ifdef MT_PRESENCE_ONLY
+    // Companion presence build: appear on Meshtastic, but never post chat text,
+    // and default location to a coarse fuzz (a personal node isn't a fixed site).
+    cfg.text_mult = 0;         // silent presence only — no Meshtastic chat message
+    cfg.pos_precision = MT_PRESENCE_DEFAULT_PRECISION;
+#else
     cfg.text_mult = 1;         // text once per flood advert (~rare, by design)
+    cfg.pos_precision = 32;    // exact pin: a repeater sits at a known, fixed site
+#endif
     cfg.freq_override = 0.0f;  // auto
     cfg.tx_power = 22;
     cfg.interval_mins = 30;    // presence cadence: frequent enough to stay live
@@ -150,6 +171,10 @@ private:
     cfg.enabled = cfg.enabled ? 1 : 0;
     cfg.send_telemetry = cfg.send_telemetry ? 1 : 0;
     if (cfg.hop_limit > 3) cfg.hop_limit = 3;   // Meshtastic hop limit cap
+    // Position precision: 0 (off) or a real Meshtastic value 10..32. Anything in
+    // 1..9 is coarser than the app even offers, so round it up to the 10-bit floor.
+    if (cfg.pos_precision > 32) cfg.pos_precision = 32;
+    else if (cfg.pos_precision != 0 && cfg.pos_precision < 10) cfg.pos_precision = 10;
     cfg.short_name[sizeof(cfg.short_name) - 1] = 0;
     cfg.text[sizeof(cfg.text) - 1] = 0;
     recompute();   // re-derive in case the preset/region tables changed
@@ -180,6 +205,7 @@ private:
     Serial.println(F("  short <str|auto>   Meshtastic short name / map label, <=4 chars"));
     Serial.println(F("  nodeinfo on|off    include NodeInfo (named node 'MC <name>')"));
     Serial.println(F("  position on|off    include Position (map pin) if location set"));
+    Serial.println(F("  precision <bits>   position precision: 32=exact, 10-32 fuzz, 0=off (13~=2.9km)"));
     Serial.println(F("  telemetry on|off   include Telemetry (battery + uptime)"));
     Serial.println(F("  presets / regions  list available values"));
     Serial.println(F("  help               this list"));
@@ -262,8 +288,8 @@ private:
       return meshtastic::buildDataPacket(pkt, cap, node_num, nextId(),
                 meshtastic::PORT_NODEINFO, pl, n, key, klen, chan_hash, cfg.hop_limit);
     } else if (k == 1) {
-      if (!cfg.send_position || (c.lat == 0.0 && c.lon == 0.0)) return 0;
-      int n = meshtastic::buildPositionPayload(pl, c.lat, c.lon, c.epoch);
+      if (!cfg.send_position || cfg.pos_precision == 0 || (c.lat == 0.0 && c.lon == 0.0)) return 0;
+      int n = meshtastic::buildPositionPayload(pl, c.lat, c.lon, c.epoch, cfg.pos_precision);
       return meshtastic::buildDataPacket(pkt, cap, node_num, nextId(),
                 meshtastic::PORT_POSITION, pl, n, key, klen, chan_hash, cfg.hop_limit);
     }
@@ -395,7 +421,7 @@ public:
       if (n == (int)sizeof(Config) && magic == MAGIC) {
         memcpy(&cfg, buf, sizeof(cfg));
         sanitize();
-      } else if ((magic == MAGIC_V5 || magic == MAGIC_V6) &&
+      } else if ((magic == MAGIC_V5 || magic == MAGIC_V6 || magic == MAGIC_V7) &&
                  n > 4 && n <= (int)sizeof(Config)) {
         // Fields are only ever appended, so an older file's prefix is exactly
         // this struct's prefix — copy what it has (bytes past `n` keep the
@@ -405,7 +431,11 @@ public:
         memcpy(&cfg, buf, n);
         cfg.magic = MAGIC;
         if (magic == MAGIC_V5) cfg.short_name[0] = 0;  // MTB5 had no short name -> auto
-        cfg.send_telemetry = 1;                        // MTB6 and earlier had no telemetry knob
+        if (magic == MAGIC_V5 || magic == MAGIC_V6)
+          cfg.send_telemetry = 1;                      // MTB6 and earlier had no telemetry knob
+        // MTB7 and earlier had no pos_precision: memcpy(n) didn't touch it, so it
+        // keeps the setDefaults() value (32 for a repeater / the presence default
+        // for a companion), which is exactly the behaviour those builds had.
         sanitize();
       }
     }
@@ -434,6 +464,13 @@ public:
   }
 
   bool enabled() const { return cfg.enabled; }
+  // Small accessors so a host (e.g. the companion custom-var interface) can render
+  // the current presence config without reaching into cfg.
+  uint16_t interval() const { return cfg.interval_mins; }
+  uint8_t  precision() const { return cfg.pos_precision; }
+  bool     positionOn() const { return cfg.send_position; }
+  const char* regionName() const { return meshtastic::REGIONS[cfg.region_idx].name; }
+  const char* presetName() const { return meshtastic::PRESETS[cfg.preset_idx].name; }
 
   // The repeater just flooded a MeshCore advert: have the chat text ride a
   // beacon burst shortly after, so the Meshtastic text follows the repeater's
@@ -480,6 +517,12 @@ public:
     }
     char sn[5];
     meshtastic::resolveShortName(sn, cfg.short_name, node_num);
+    // Position indicator carries its precision: "+pos" exact, "+pos13" fuzzed to
+    // 13 bits, "" when position is off entirely.
+    char posbuf[12];
+    if (!cfg.send_position || cfg.pos_precision == 0) posbuf[0] = 0;
+    else if (cfg.pos_precision >= 32) strcpy(posbuf, "+pos");
+    else snprintf(posbuf, sizeof(posbuf), "+pos%d", (int)cfg.pos_precision);
     // single bounded write -> shows the full text, never overflows reply[160]
     // "p<N>m" = presence cadence; "txt<N>x" = text N times per flood-advert period
     // "!<id>/<short>" = Meshtastic node id and the short name / map label
@@ -488,7 +531,7 @@ public:
              cfg.enabled ? "ON" : "off", fbuf, cfg.freq_override > 0.0f ? "*" : "",
              r.name, p.name, (int)cfg.sf, (int)cfg.bw, (int)cfg.interval_mins,
              (int)ep, ep < cfg.tx_power ? "(cap)" : "", (int)cfg.hop_limit,
-             cfg.send_nodeinfo ? "+info" : "", cfg.send_position ? "+pos" : "",
+             cfg.send_nodeinfo ? "+info" : "", posbuf,
              cfg.send_telemetry ? "+tel" : "",
              txt, (unsigned long)node_num, sn, cfg.text);
   }
@@ -514,7 +557,7 @@ public:
       strcpy(reply, "OK - tx stats cleared");
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printHelp();
-      strcpy(reply, "cmds: status stats on off send | interval text.mult text short freq power hops preset region nodeinfo position telemetry | presets regions help");
+      strcpy(reply, "cmds: status stats on off send | interval text.mult text short freq power hops preset region nodeinfo position precision telemetry | presets regions help");
     } else if (memcmp(a, "nodeinfo ", 9) == 0) {
       cfg.send_nodeinfo = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - nodeinfo %s", cfg.send_nodeinfo ? "on" : "off");
@@ -524,6 +567,19 @@ public:
     } else if (memcmp(a, "position ", 9) == 0) {
       cfg.send_position = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - position %s", cfg.send_position ? "on" : "off");
+    } else if (memcmp(a, "precision ", 10) == 0) {
+      const char* arg = a + 10;
+      int p = (strcasecmp(arg, "exact") == 0) ? 32
+            : (strcasecmp(arg, "off") == 0)   ? 0 : atoi(arg);
+      if (p != 0 && (p < 10 || p > 32)) {
+        strcpy(reply, "Error: precision 10-32, or 32=exact / 0=off");
+      } else {
+        cfg.pos_precision = (uint8_t)p; save(fs);
+        if (p == 0)       strcpy(reply, "OK - position off (0 bits)");
+        else if (p == 32) strcpy(reply, "OK - exact position (32 bits)");
+        else sprintf(reply, "OK - position fuzzed to %d bits (%s circle)", p,
+                     meshtastic::precisionLabel(p));
+      }
     } else if (strcmp(a, "on") == 0) {
       cfg.enabled = 1; scheduleNext(); save(fs); strcpy(reply, "OK - beacon on");
     } else if (strcmp(a, "off") == 0) {

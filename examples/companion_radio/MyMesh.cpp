@@ -3,6 +3,10 @@
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
 
+#ifdef WITH_MT_PRESENCE
+extern RADIO_CLASS radio;   // concrete RadioLib radio (defined in the variant target.cpp)
+#endif
+
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
 #define CMD_SEND_CHANNEL_TXT_MSG      3
@@ -966,6 +970,18 @@ void MyMesh::begin(bool has_display) {
   radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
   MESH_DEBUG_PRINTLN("RX Boosted Gain Mode: %s",
                      radio_driver.getRxBoostedGainMode() ? "Enabled" : "Disabled");
+
+#ifdef WITH_MT_PRESENCE
+  // Derive a stable Meshtastic node number + starting packet id from our pubkey,
+  // exactly as the repeater does, so this node keeps the same map identity across
+  // reboots.
+  {
+    const uint8_t* pk = self_id.pub_key;
+    uint32_t node = ((uint32_t)pk[0] << 24) | ((uint32_t)pk[1] << 16) | ((uint32_t)pk[2] << 8) | pk[3];
+    uint32_t seed = ((uint32_t)pk[4] << 24) | ((uint32_t)pk[5] << 16) | ((uint32_t)pk[6] << 8) | pk[7];
+    _beacon.begin(_store->getPrimaryFS(), node, seed);
+  }
+#endif
 }
 
 const char *MyMesh::getNodeName() {
@@ -1794,6 +1810,24 @@ void MyMesh::handleCmdFrame(size_t len) {
       strcpy(dp, sensors.getSettingValue(i));
       dp = strchr(dp, 0);
     }
+#ifdef WITH_MT_PRESENCE
+    // Advertise the Meshtastic-presence settings as custom vars too, so they show
+    // up (and are editable) in the phone app with no app-side changes. Bounded so
+    // it can never overrun the frame if a board has many sensor settings.
+    {
+      char pv[128];
+      int pn = snprintf(pv, sizeof(pv),
+                        "mt.presence:%d,mt.interval:%d,mt.position:%d,mt.precision:%d,mt.region:%s,mt.preset:%s",
+                        _beacon.enabled() ? 1 : 0, (int)_beacon.interval(),
+                        _beacon.positionOn() ? 1 : 0, (int)_beacon.precision(),
+                        _beacon.regionName(), _beacon.presetName());
+      bool need_comma = (dp != (char *)&out_frame[1]);
+      if (pn > 0 && (dp - (char *)out_frame) + (need_comma ? 1 : 0) + pn < MAX_FRAME_SIZE) {
+        if (need_comma) *dp++ = ',';
+        memcpy(dp, pv, pn); dp += pn;
+      }
+    }
+#endif
     _serial->writeFrame(out_frame, dp - (char *)out_frame);
   } else if (cmd_frame[0] == CMD_SET_CUSTOM_VAR && len >= 4) {
     cmd_frame[len] = 0;
@@ -1801,6 +1835,14 @@ void MyMesh::handleCmdFrame(size_t len) {
     char *np = strchr(sp, ':'); // look for separator char
     if (np) {
       *np++ = 0; // modify 'cmd_frame', replace ':' with null
+#ifdef WITH_MT_PRESENCE
+      if (strncmp(sp, "mt.", 3) == 0) {   // Meshtastic-presence var: route to the beacon
+        char rep[160];
+        if (applyPresenceVar(sp, np, rep)) writeOKFrame();
+        else writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+      } else
+#endif
+      {
       bool success = sensors.setSettingValue(sp, np);
       if (success) {
         #if ENV_INCLUDE_GPS == 1
@@ -1818,6 +1860,7 @@ void MyMesh::handleCmdFrame(size_t len) {
       } else {
         writeErrFrame(ERR_CODE_ILLEGAL_ARG);
       }
+      }   // close the non-"mt." branch opened for the WITH_MT_PRESENCE intercept
     } else {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
     }
@@ -2231,7 +2274,69 @@ void MyMesh::loop() {
 #ifdef DISPLAY_CLASS
   if (_ui) _ui->setHasConnection(_serial->isConnected());
 #endif
+
+#ifdef WITH_MT_PRESENCE
+  // Time-slice a silent Meshtastic presence (NodeInfo + optional fuzzed Position)
+  // onto the air when the radio is idle, then restore the MeshCore PHY. The radio
+  // is the phone's live link, so the retune only happens between packets.
+  {
+    // isInRecvMode() is false while a MeshCore transmit is in flight (already
+    // dequeued, so hasPendingWork() no longer sees it). Without this the beacon
+    // could retune the radio mid-transmit, aborting the send and wedging CAD.
+    bool busy = hasPendingWork() || radio_driver.isReceiving()
+             || !radio_driver.isInRecvMode();
+    MtBeaconControl::Context ctx;
+    ctx.node_name = _prefs.node_name;
+    // Honour the MeshCore location choice: only share a Position on Meshtastic if
+    // this node already shares its location in its MeshCore advert. When it does,
+    // the beacon fuzzes it to cfg.pos_precision (default coarse). Otherwise pass
+    // 0/0 and buildKind() emits NodeInfo only — no pin, no leak.
+    if (_prefs.advert_loc_policy == ADVERT_LOC_SHARE) {
+      ctx.lat = sensors.node_lat;
+      ctx.lon = sensors.node_lon;
+    } else {
+      ctx.lat = 0.0; ctx.lon = 0.0;
+    }
+    ctx.epoch = getRTCClock()->getCurrentTime();
+    ctx.flood_advert_hours = 0;                         // presence-only: chat text is off
+    ctx.batt_millivolts = board.getBattMilliVolts();    // Telemetry: battery
+    ctx.uptime_secs = (uint32_t)(millis() / 1000);      // Telemetry: uptime
+    ctx.home_freq = _prefs.freq; ctx.home_bw = _prefs.bw;
+    ctx.home_sf = _prefs.sf;     ctx.home_cr = _prefs.cr;
+    ctx.home_sync = MESHCORE_SYNC_WORD;
+    ctx.home_tx_power = _prefs.tx_power_dbm;
+    _beacon.tick(radio_driver, radio, busy, ctx);
+  }
+#endif
 }
+
+#ifdef WITH_MT_PRESENCE
+// Route an "mt.*" custom var to the presence engine by synthesising the equivalent
+// "mtbeacon ..." CLI verb, so the phone app's generic custom-var editor drives the
+// same validated config path the repeater's serial CLI uses. Returns false (-> the
+// app sees ERR) on an unknown key or out-of-range value.
+bool MyMesh::applyPresenceVar(const char* name, const char* value, char* reply) {
+  FILESYSTEM* fs = _store->getPrimaryFS();
+  char cmd[48];
+  if (strcmp(name, "mt.presence") == 0)
+    snprintf(cmd, sizeof(cmd), "mtbeacon %s", (atoi(value) != 0) ? "on" : "off");
+  else if (strcmp(name, "mt.interval") == 0)
+    snprintf(cmd, sizeof(cmd), "mtbeacon interval %d", atoi(value));
+  else if (strcmp(name, "mt.position") == 0)
+    snprintf(cmd, sizeof(cmd), "mtbeacon position %s", (atoi(value) != 0) ? "on" : "off");
+  else if (strcmp(name, "mt.precision") == 0)
+    snprintf(cmd, sizeof(cmd), "mtbeacon precision %d", atoi(value));
+  else if (strcmp(name, "mt.region") == 0)
+    snprintf(cmd, sizeof(cmd), "mtbeacon region %.20s", value);
+  else if (strcmp(name, "mt.preset") == 0)
+    snprintf(cmd, sizeof(cmd), "mtbeacon preset %.20s", value);
+  else
+    return false;   // unknown mt.* key
+  // handleCommand returns true for any mtbeacon verb but writes an "Error: ..."
+  // reply on a bad argument; surface that as a failed set.
+  return _beacon.handleCommand(cmd, reply, fs) && strncmp(reply, "Error", 5) != 0;
+}
+#endif
 
 bool MyMesh::advert() {
   mesh::Packet* pkt;

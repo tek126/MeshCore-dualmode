@@ -26,6 +26,14 @@
 #include "DataStore.h"
 #include "NodePrefs.h"
 
+#ifdef WITH_MT_PRESENCE
+// Meshtastic presence: reuse the header-only beacon engine from the repeater, but
+// in a presence-only profile (NodeInfo + optional fuzzed Position, no chat text).
+// -I examples/meshtastic_beacon supplies the headers; -D MT_PRESENCE_ONLY selects
+// the presence defaults (see MtBeaconControl::setDefaults).
+#include "MtBeaconControl.h"
+#endif
+
 #include <RTClib.h>
 #include <helpers/ArduinoHelpers.h>
 #include <helpers/BaseSerialInterface.h>
@@ -205,6 +213,10 @@ private:
 
   DataStore* _store;
   NodePrefs _prefs;
+#ifdef WITH_MT_PRESENCE
+  MtBeaconControl _beacon;              // Meshtastic presence engine (presence-only)
+  bool applyPresenceVar(const char* name, const char* value, char* reply);
+#endif
   uint32_t pending_login;
   uint32_t pending_status;
   uint32_t pending_telemetry, pending_discovery;   // pending _TELEMETRY_REQ
