@@ -1,71 +1,76 @@
 # Meshtastic presence (BLE companion)
 
-Make a MeshCore **companion** node also show up on the **Meshtastic** side — in
-everyone's nodelist, and (optionally) on the map — without it ever sending a
-Meshtastic chat message. It reuses the battle-tested beacon engine from the
-repeater (`examples/meshtastic_beacon`) in a *presence-only* profile.
+A MeshCore **companion** node can also show on **Meshtastic**. It shows with a name
+in the node list, and on the map if you permit it. It does not send a Meshtastic
+chat message. It uses the beacon engine from the repeater
+(`examples/meshtastic_beacon`) in a presence-only mode.
 
-Built behind `-D WITH_MT_PRESENCE`. See the reference env
+Build it with `-D WITH_MT_PRESENCE`. For an example env, see
 `Heltec_t114_companion_radio_ble_mtpresence` in `variants/heltec_t114/platformio.ini`.
 
-## What it does (and doesn't)
+## What it does
 
-- **Presence, not chat.** It periodically retunes to the Meshtastic channel and
-  emits **NodeInfo** (so the node appears named in the nodelist), optionally a
-  **Position** (a map pin), and **Telemetry** (battery + uptime), then retunes
-  back. It never posts a Meshtastic text message — `text_mult` defaults to `0`.
-- **The radio is the phone's link.** The retune only happens between packets
-  (the engine defers while the mesh has queued/in-flight work), so the phone's
-  BLE session is not disrupted. The presence cadence defaults to 30 min.
-- **Off by default.** Presence starts disabled; enable it with `mt.presence:1`.
+- **It sends a presence, not a chat message.** The node changes the radio to the
+  Meshtastic channel at intervals. It sends **NodeInfo** (so the node shows with a
+  name in the node list), an optional **Position** (a map point), and **Telemetry**
+  (the battery and the run time). Then it changes the radio back. It does not send a
+  Meshtastic text message. `text_mult` is `0` by default.
+- **The radio is the phone link.** The node changes the radio only between packets.
+  The engine waits while the mesh has queued or in-progress work. Thus the phone BLE
+  session continues. The default interval is 30 minutes.
+- **It is off by default.** The presence starts off. To start it, set `mt.presence`
+  to `1`.
 
-## Location is gated twice — it can't over-share
+## The location has two controls
 
-A companion is personal and mobile, so Position is handled conservatively:
+A companion is personal and mobile. Thus the node controls the location carefully:
 
-1. **Only if MeshCore already shares location.** The Meshtastic Position is sent
-   *only* when this node's own advert shares its location
-   (`advert_loc_policy == ADVERT_LOC_SHARE`). If MeshCore isn't publishing a
-   location, the beacon emits **NodeInfo only** — no pin, nothing leaked. This
-   mirrors `MyMesh::advert()` exactly, so the two can never disagree.
-2. **Fuzzed, not exact.** When location *is* shared, it's obfuscated using
-   Meshtastic's own **position precision** (`precision_bits`): the low lat/lon
-   bits are masked off and receivers draw an uncertainty *circle* instead of a
-   point. Default is **13 bits ≈ a 2.9 km circle** ("this node lives in this
-   town"), not a street address. Dial it with `mt.precision`.
+1. **It sends a location only if MeshCore shares a location.** The node sends a
+   Meshtastic Position only when it shares its location in its MeshCore advert
+   (`advert_loc_policy == ADVERT_LOC_SHARE`). If MeshCore does not share a location,
+   the node sends **NodeInfo only** — no point, no location data. This is the same
+   as `MyMesh::advert()`, so the two always agree.
+2. **It makes the location less accurate.** When the node shares a location, it makes
+   the location less accurate. It uses the Meshtastic **position precision**
+   (`precision_bits`): it removes the low bits of the latitude and the longitude, and
+   the Meshtastic client shows an *uncertainty circle*, not a point. The default is
+   **13 bits (a circle near 2.9 km)** — "this node is in this town", not a street
+   address. Set it with `mt.precision`.
 
-| precision | radius | | precision | radius |
+| precision | circle | | precision | circle |
 |---|---|---|---|---|
 | 10 | ~23 km | | 16 | ~360 m |
 | 12 | ~5.8 km | | 18 | ~90 m |
 | 13 | ~2.9 km | | 19 | ~45 m |
-| 14 | ~1.5 km | | 32 | exact pin |
+| 14 | ~1.5 km | | 32 | exact point |
 
-`mt.precision:0` suppresses Position entirely even when location is shared.
+`mt.precision:0` stops the Position fully, even when the node shares a location.
 
-## Configuration — from the phone app, no app changes
+## How to configure it from the phone app
 
-The BLE companion has no serial CLI, so presence is configured through the phone
-app's generic **custom variables** editor (`CMD_GET/SET_CUSTOM_VAR`). These keys
-appear automatically alongside the usual node settings:
+The BLE companion does not have a serial CLI. Thus you set the presence from the
+**custom-variables** list in the phone app (`CMD_GET/SET_CUSTOM_VAR`). These
+variables show automatically with the other node settings. You do not need to change
+the app.
 
-| var | values | meaning |
+| Variable | Values | Function |
 |---|---|---|
-| `mt.presence` | `0` / `1` | enable presence beaconing |
-| `mt.interval` | `1`–`1440` | presence cadence, minutes |
-| `mt.position` | `0` / `1` | include a Position pin at all |
-| `mt.precision` | `0`, `10`–`32` | position fuzz (32 = exact, 0 = off) |
-| `mt.region` | `US`, `EU_868`, … | Meshtastic region/band |
-| `mt.preset` | `LongFast`, `MediumFast`, … | Meshtastic modem preset |
+| `mt.presence` | `0` / `1` | Set the presence to on. The default is off. |
+| `mt.interval` | `1`–`1440` | The interval between presence messages, in minutes. |
+| `mt.position` | `0` / `1` | Set the map point to on or off. |
+| `mt.precision` | `0`, `10`–`32` | The location accuracy (32 = exact, 0 = off). |
+| `mt.region` | `US`, `EU_868`, and others | The Meshtastic region and band. |
+| `mt.preset` | `LongFast`, and others | The Meshtastic modem preset. |
 
-Each set is routed to the same validated `mtbeacon` config path the repeater's
-serial CLI uses, so out-of-range values are rejected (the app sees an error) and
-accepted values are persisted to `/mtbeacon`.
+Each value goes to the same `mtbeacon` configuration path that the repeater serial
+CLI uses. Thus the firmware refuses a value that is out of range (the app shows an
+error), and it keeps a good value in the `/mtbeacon` file.
 
 ## Limits
 
-- Only the default Meshtastic channel's presence is emitted (region + preset
-  pick the frequency); it is not a Meshtastic router and never rebroadcasts.
-- Meshtastic and MeshCore are incompatible on-air, so presence necessarily
-  borrows the radio for a brief retune — infrequent, but validate on-air that
-  your phone link tolerates it before relying on it.
+- The node sends the presence for the default Meshtastic channel only (the region and
+  the preset select the frequency). The node is not a Meshtastic router; it does not
+  repeat traffic.
+- Meshtastic and MeshCore are not compatible on the air. Thus a presence needs a short
+  radio change. This is not frequent. Before you depend on it, make a test on the air
+  to make sure that your phone link is stable.
