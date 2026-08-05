@@ -1,29 +1,30 @@
 # T1000-E dual-mode build
 
-One firmware that contains both `companion_radio` and `simple_repeater` and
-picks which to run at boot. A 5x user-button press toggles a persisted flag and
-reboots into the other mode.
+This is one firmware that contains both `companion_radio` and `simple_repeater`.
+It selects which one to run at boot. A 5-press of the user button changes a saved
+flag and restarts the node in the other mode.
 
-## How it co-compiles
+## How it compiles together
 
-Three `main.cpp` files are linked together:
+The build links three `main.cpp` files together:
 
-- `examples/dualmode/main.cpp` owns the real Arduino `setup()` / `loop()`. It
-  reads the mode flag from `/dualmode` and dispatches to `rpt_*` or `cmp_*`.
-- `examples/simple_repeater/main.cpp` — under `-D DUALMODE` its entry points are
-  renamed to `rpt_setup()` / `rpt_loop()` (see the bottom of that file), and
-  `dualmode_rename.h` (included first) renames its `MyMesh`/`UITask` classes to
-  `RptMesh`/`RptUITask` so they don't collide with the companion's.
-- `examples/companion_radio/main.cpp` — under `-D DUALMODE` its entry points
-  become `cmp_setup()` / `cmp_loop()`; it keeps the `MyMesh`/`UITask` names.
+- `examples/dualmode/main.cpp` has the real Arduino `setup()` and `loop()`. It
+  reads the mode flag from `/dualmode` and calls `rpt_*` or `cmp_*`.
+- `examples/simple_repeater/main.cpp` — with `-D DUALMODE`, its entry points change
+  to `rpt_setup()` and `rpt_loop()` (see the end of that file). `dualmode_rename.h`
+  (included first) changes its `MyMesh` and `UITask` classes to `RptMesh` and
+  `RptUITask`, so they do not collide with the companion classes.
+- `examples/companion_radio/main.cpp` — with `-D DUALMODE`, its entry points change
+  to `cmp_setup()` and `cmp_loop()`. It keeps the `MyMesh` and `UITask` names.
 
-The repeater UI is compiled out in dual-mode (`#if defined(DISPLAY_CLASS) &&
-!defined(DUALMODE)`), so only the companion's display path is active. On the
-screenless T1000-E that means no UI either way.
+The build removes the repeater UI in dual-mode (`#if defined(DISPLAY_CLASS) &&
+!defined(DUALMODE)`). Thus only the companion display path is active. The T1000-E
+has no screen, so there is no UI in either mode.
 
 ## PlatformIO env
 
-The env is the union of the companion-BLE and repeater builds plus the launcher:
+The env is the union of the companion-BLE build and the repeater build, plus the
+launcher:
 
 ```ini
 [env:t1000e_dualmode]
@@ -70,11 +71,11 @@ build_flags = ${env:t1000e_dualmode.build_flags}
 lib_deps = ${env:t1000e_dualmode.lib_deps}
 ```
 
-In the `+mtbeacon` build the beacon is active only in Repeater mode; configure it
-over the repeater's serial CLI (`mtbeacon ...`). See the beacon project for the
-add-on source and full docs.
+In the `+mtbeacon` build, the beacon is active in Repeater mode only. Configure it
+over the repeater serial CLI (`mtbeacon ...`). See the beacon project for the
+add-on source and the full documentation.
 
-There is also `[env:t1000e_dualmode_carnode]`, where the repeater side is the
-[car node](../car_node/) instead: park-triggered live-GPS Meshtastic beacon,
-periodic presence, repeat sleep, and hold-to-hibernate (~3 s; a 5x press still
-switches modes). The onboard GPS defaults on in repeater mode.
+There is also `[env:t1000e_dualmode_carnode]`. Here the repeater side is the
+[car node](../car_node/): a park-triggered live-GPS Meshtastic beacon, a periodic
+presence, repeat sleep, and hold-to-hibernate (near 3 seconds; a 5-press still
+changes the mode). The GPS on the board is on by default in repeater mode.
