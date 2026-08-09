@@ -13,4 +13,11 @@
 #ifdef DUALMODE
   #define MyMesh  RptMesh
   #define UITask  RptUITask
+  // v1.17.0 made both halves' NodePrefs polymorphic (ConfigSerializer base with
+  // a virtual structure()). Same class name + vtable = vague linkage: the linker
+  // keeps ONE vtable for the whole binary, so one half serializes its prefs
+  // through the OTHER half's structure() against the wrong memory layout.
+  // Renaming the repeater's class gives each half its own vtable. CommonCLI.h
+  // carries an identical #define for TUs that include it without this shim.
+  #define NodePrefs RptNodePrefs
 #endif
