@@ -28,6 +28,21 @@ static bool isValidName(const char *n) {
 }
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
+#ifdef DUALMODE
+  // One-time recovery: before the halves' prefs files were separated, the
+  // companion half may have written its own schema into the shared
+  // "/prefs.json" (or blocked this half's migration by creating it first). If
+  // the pre-1.17 repeater prefs are still on flash, they are authoritative —
+  // migrate them over whatever "/prefs.json" holds, then consume the old file
+  // so later boots take the normal path.
+  if (fs->exists("/com_prefs")) {
+    loadPrefsInt(fs, "/com_prefs");
+    if (savePrefs(fs)) {
+      fs->remove("/com_prefs");
+    }
+    return;
+  }
+#endif
   if (fs->exists("/prefs.json")) {
 #if defined(RP2040_PLATFORM)
     File file = fs->open("/prefs.json", "r");

@@ -7,6 +7,19 @@
   #define MAX_BLOBRECS 20
 #endif
 
+// v1.17.0 moved BOTH the companion's and the repeater's prefs to "/prefs.json".
+// In a DUALMODE build the two halves share one filesystem, so their different
+// schemas would clobber each other on every mode switch — keep the companion on
+// its own file there. (Missing file -> the "/new_prefs" migration below runs,
+// so pre-1.17 companion settings still come across.)
+#ifndef COMPANION_PREFS_FILE
+  #ifdef DUALMODE
+    #define COMPANION_PREFS_FILE "/cmp_prefs.json"
+  #else
+    #define COMPANION_PREFS_FILE "/prefs.json"
+  #endif
+#endif
+
 DataStore::DataStore(FILESYSTEM& fs, mesh::RTCClock& clock) : _fs(&fs), _fsExtra(nullptr), _clock(&clock),
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
     identity_store(fs, "")
@@ -190,8 +203,8 @@ bool DataStore::saveMainIdentity(const mesh::LocalIdentity &identity) {
 }
 
 void DataStore::loadPrefs(NodePrefs& prefs) {
-  if (_fs->exists("/prefs.json")) {
-    File file = openRead(_fs, "/prefs.json");
+  if (_fs->exists(COMPANION_PREFS_FILE)) {
+    File file = openRead(_fs, COMPANION_PREFS_FILE);
     if (file) {
       prefs.loadSerial(file);   // new Serial prefs
       file.close();
@@ -247,7 +260,7 @@ void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs) {
 }
 
 bool DataStore::savePrefs(NodePrefs& _prefs) {
-  File file = openWrite(_fs, "/prefs.json");
+  File file = openWrite(_fs, COMPANION_PREFS_FILE);
   if (file) {
     bool success = _prefs.saveSerial(file);
     file.close();
