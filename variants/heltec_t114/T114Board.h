@@ -50,11 +50,8 @@ public:
 #ifdef LED_PIN
     digitalWrite(LED_PIN, HIGH);
 #endif
-#if ENV_INCLUDE_GPS == 1
-    pinMode(GPS_EN, OUTPUT);
-    digitalWrite(GPS_EN, LOW);
-#endif
-    sd_power_system_off();
+
+    NRF52Board::powerOff();
   }
 
   // Hibernate waking on the user button. Waits for the button to be released
