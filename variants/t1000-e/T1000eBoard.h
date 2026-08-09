@@ -88,7 +88,7 @@ public:
     nrf_gpio_cfg_sense_input(BUTTON_PIN, NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_SENSE_HIGH);
     #endif
 
-    sd_power_system_off();
+    NRF52Board::powerOff();
   }
 
   // Car-node hold-to-hibernate. powerOff() already shuts the peripherals down,

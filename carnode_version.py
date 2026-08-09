@@ -1,5 +1,5 @@
 # Injects the git short SHA into FIRMWARE_VERSION for car_node builds, so the
-# on-device `ver` command shows e.g. "v1.16.0+carnode-2c319911" — making it
+# on-device `ver` command shows e.g. "v1.17.0+carnode-2c319911" — making it
 # obvious which build is actually flashed. Referenced via extra_scripts in the
 # *_carnode envs. FIRMWARE_VERSION is guarded by #ifndef in MyMesh.h, so this
 # -D wins.
@@ -23,7 +23,7 @@ def git_describe():
     return rev + ("-dirty" if dirty else "")
 
 
-version = "v1.16.0+carnode-%s" % git_describe()
+version = "v1.17.0+carnode-%s" % git_describe()
 
 try:
     macro = env.StringifyMacro(version)      # portable quoting (PlatformIO)
