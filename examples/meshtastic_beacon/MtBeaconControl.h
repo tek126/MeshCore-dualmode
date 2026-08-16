@@ -77,9 +77,12 @@ public:
     // v7: emit Telemetry/DeviceMetrics (battery + uptime) with the presence.
     uint8_t  send_telemetry;
     // v8: Meshtastic position precision (bits). 32 = exact pin, 10..31 fuzz the
-    // fix into an uncertainty circle, 0 = suppress Position entirely. Appended
-    // last so older files migrate in place (see load()).
+    // fix into an uncertainty circle, 0 = suppress Position entirely.
     uint8_t  pos_precision;
+    // v9: explicit Meshtastic "frequency slot" (1-based, as the app shows it).
+    // 0 = auto: the default channel-name-hash slot. Appended last so older
+    // files migrate in place (see load()).
+    uint8_t  freq_slot;
   };
 
   // Live per-send context the repeater supplies each tick (name/location/clock,
@@ -97,7 +100,8 @@ public:
   };
 
 private:
-  static const uint32_t MAGIC    = 0x3842544DUL;  // 'MTB8' (bumped: added pos_precision)
+  static const uint32_t MAGIC    = 0x3942544DUL;  // 'MTB9' (bumped: added freq_slot)
+  static const uint32_t MAGIC_V8 = 0x3842544DUL;  // 'MTB8' (+pos_precision; migrated on load)
   static const uint32_t MAGIC_V7 = 0x3742544DUL;  // 'MTB7' (+send_telemetry; migrated on load)
   static const uint32_t MAGIC_V6 = 0x3642544DUL;  // 'MTB6' (+short_name; migrated on load)
   static const uint32_t MAGIC_V5 = 0x3542544DUL;  // 'MTB5' (+hop_limit; migrated on load)
@@ -151,7 +155,8 @@ private:
   }
 
   // Fill the derived modem params + channel hash from region + preset (or the
-  // manual frequency override). Call after any region/preset/freq change.
+  // explicit frequency slot / manual frequency override). Call after any
+  // region/preset/slot/freq change.
   void recompute() {
     if (cfg.region_idx >= meshtastic::NUM_REGIONS) cfg.region_idx = 0;
     if (cfg.preset_idx >= meshtastic::NUM_PRESETS) cfg.preset_idx = 0;
@@ -159,8 +164,14 @@ private:
     const meshtastic::Region& r = meshtastic::REGIONS[cfg.region_idx];
     cfg.bw = p.bw_khz; cfg.sf = p.sf; cfg.cr = p.cr;
     cfg.sync_word = 0x2B; cfg.preamble = 16;
+    // A slot set for a wider-band region/preset can exceed this one's channel
+    // count; treat it as auto rather than transmitting out of band.
+    if (cfg.freq_slot > meshtastic::numChannels(r, p)) cfg.freq_slot = 0;
     cfg.freq = (cfg.freq_override > 0.0f) ? cfg.freq_override
+             : (cfg.freq_slot > 0)        ? meshtastic::slotFreq(r, p, cfg.freq_slot)
                                           : meshtastic::presetFreq(r, p);
+    // NOTE: the channel hash comes from the channel NAME only — an explicit
+    // frequency slot does not change it, exactly as in Meshtastic firmware.
     chan_hash = meshtastic::channelHash(p.name, meshtastic::DEFAULT_KEY,
                                         sizeof(meshtastic::DEFAULT_KEY));
   }
@@ -198,7 +209,8 @@ private:
     Serial.println(F("  text.mult <N>      chat text N times per flood-advert period (0=never)"));
     Serial.println(F("  preset <name>      modem preset (LongFast, MediumFast, ...)"));
     Serial.println(F("  region <name>      region/country band (US, EU_868, ...)"));
-    Serial.println(F("  freq <MHz|auto>    manual frequency override; auto = region+preset"));
+    Serial.println(F("  slot <N|auto>      Meshtastic frequency slot (1-based); auto = default"));
+    Serial.println(F("  freq <MHz|auto>    manual frequency override; auto = region+preset(+slot)"));
     Serial.println(F("  power <dBm>        TX power, -9..22 (capped to region limit)"));
     Serial.println(F("  hops <0-3>         Meshtastic hop limit for presence + text (default 0)"));
     Serial.println(F("  text <string>      the chat-message content (<=63 chars)"));
@@ -421,7 +433,8 @@ public:
       if (n == (int)sizeof(Config) && magic == MAGIC) {
         memcpy(&cfg, buf, sizeof(cfg));
         sanitize();
-      } else if ((magic == MAGIC_V5 || magic == MAGIC_V6 || magic == MAGIC_V7) &&
+      } else if ((magic == MAGIC_V5 || magic == MAGIC_V6 || magic == MAGIC_V7 ||
+                  magic == MAGIC_V8) &&
                  n > 4 && n <= (int)sizeof(Config)) {
         // Fields are only ever appended, so an older file's prefix is exactly
         // this struct's prefix — copy what it has (bytes past `n` keep the
@@ -436,6 +449,9 @@ public:
         // MTB7 and earlier had no pos_precision: memcpy(n) didn't touch it, so it
         // keeps the setDefaults() value (32 for a repeater / the presence default
         // for a companion), which is exactly the behaviour those builds had.
+        // MTB8 and earlier had no freq_slot; the copy can land in the old file's
+        // trailing padding, so force auto (= those builds' behaviour) explicitly.
+        cfg.freq_slot = 0;
         sanitize();
       }
     }
@@ -468,6 +484,7 @@ public:
   // the current presence config without reaching into cfg.
   uint16_t interval() const { return cfg.interval_mins; }
   uint8_t  precision() const { return cfg.pos_precision; }
+  uint8_t  freqSlot() const { return cfg.freq_slot; }   // 0 = auto (default slot)
   bool     positionOn() const { return cfg.send_position; }
   const char* regionName() const { return meshtastic::REGIONS[cfg.region_idx].name; }
   const char* presetName() const { return meshtastic::PRESETS[cfg.preset_idx].name; }
@@ -497,6 +514,11 @@ public:
     int8_t ep = effectivePower();
     char fbuf[14] = {0};
     appendFreq(fbuf, cfg.freq);
+    // freq marker: "*" = manual MHz override, "(sN)" = explicit frequency slot
+    char fmark[8];
+    if (cfg.freq_override > 0.0f) strcpy(fmark, "*");
+    else if (cfg.freq_slot > 0) snprintf(fmark, sizeof(fmark), "(s%d)", (int)cfg.freq_slot);
+    else fmark[0] = 0;
     char txt[32];
     if (cfg.text_mult == 0) strcpy(txt, "txt:off");
     else if (flood_hours_seen == 0) snprintf(txt, sizeof(txt), "txt%dx(noadv)", (int)cfg.text_mult);
@@ -528,7 +550,7 @@ public:
     // "!<id>/<short>" = Meshtastic node id and the short name / map label
     snprintf(reply, 160,
              "beacon %s %sMHz%s %s %s(SF%d BW%d) p%dm %ddBm%s h%d %s%s%s %s !%08lx/%s \"%s\"",
-             cfg.enabled ? "ON" : "off", fbuf, cfg.freq_override > 0.0f ? "*" : "",
+             cfg.enabled ? "ON" : "off", fbuf, fmark,
              r.name, p.name, (int)cfg.sf, (int)cfg.bw, (int)cfg.interval_mins,
              (int)ep, ep < cfg.tx_power ? "(cap)" : "", (int)cfg.hop_limit,
              cfg.send_nodeinfo ? "+info" : "", posbuf,
@@ -557,7 +579,7 @@ public:
       strcpy(reply, "OK - tx stats cleared");
     } else if (strcmp(a, "help") == 0 || strcmp(a, "?") == 0) {
       printHelp();
-      strcpy(reply, "cmds: status stats on off send | interval text.mult text short freq power hops preset region nodeinfo position precision telemetry | presets regions help");
+      strcpy(reply, "cmds: status stats on off send | interval text.mult text short slot freq power hops preset region nodeinfo position precision telemetry | presets regions help");
     } else if (memcmp(a, "nodeinfo ", 9) == 0) {
       cfg.send_nodeinfo = (strcasecmp(a + 9, "on") == 0) ? 1 : 0; save(fs);
       sprintf(reply, "OK - nodeinfo %s", cfg.send_nodeinfo ? "on" : "off");
@@ -618,6 +640,24 @@ public:
         cfg.region_idx = idx; cfg.freq_override = 0.0f; recompute(); save(fs);
         strcpy(reply, "OK - "); strcat(reply, meshtastic::REGIONS[idx].name);
         strcat(reply, " @ "); appendFreq(reply, cfg.freq); strcat(reply, " MHz");
+      }
+    } else if (memcmp(a, "slot ", 5) == 0) {
+      const char* arg = a + 5;
+      const meshtastic::Preset& p = meshtastic::PRESETS[cfg.preset_idx];
+      const meshtastic::Region& r = meshtastic::REGIONS[cfg.region_idx];
+      int numch = meshtastic::numChannels(r, p);
+      if (strcasecmp(arg, "auto") == 0 || strcmp(arg, "0") == 0) {
+        cfg.freq_slot = 0; recompute(); save(fs);
+        strcpy(reply, "OK - slot auto: "); appendFreq(reply, cfg.freq); strcat(reply, " MHz");
+      } else {
+        int s = atoi(arg);
+        if (s < 1 || s > numch) {
+          sprintf(reply, "Error: slot 1-%d for %s %s (or 'auto')", numch, r.name, p.name);
+        } else {
+          cfg.freq_slot = (uint8_t)s; cfg.freq_override = 0.0f; recompute(); save(fs);
+          sprintf(reply, "OK - slot %d/%d: ", s, numch); appendFreq(reply, cfg.freq);
+          strcat(reply, " MHz");
+        }
       }
     } else if (memcmp(a, "freq ", 5) == 0) {
       const char* arg = a + 5;

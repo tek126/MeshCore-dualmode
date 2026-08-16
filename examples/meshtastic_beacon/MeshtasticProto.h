@@ -83,12 +83,24 @@ inline uint32_t djb2(const char* s) {
   return h;
 }
 
-inline float presetFreq(const Region& r, const Preset& p) {
+inline int numChannels(const Region& r, const Preset& p) {
   float bw = p.bw_khz / 1000.0f;                     // MHz
   int numch = (int)((r.freq_end - r.freq_start) / bw);
-  if (numch < 1) numch = 1;                          // guard narrow bands (no %0)
-  uint32_t slot = djb2(p.name) % (uint32_t)numch;
-  return r.freq_start + bw / 2.0f + (float)slot * bw;
+  return numch < 1 ? 1 : numch;                      // guard narrow bands (no %0)
+}
+
+// Center frequency of a 1-based frequency slot (what the Meshtastic app calls
+// the LoRa "frequency slot"). Caller validates 1 <= slot <= numChannels().
+inline float slotFreq(const Region& r, const Preset& p, int slot) {
+  float bw = p.bw_khz / 1000.0f;                     // MHz
+  return r.freq_start + bw / 2.0f + (float)(slot - 1) * bw;
+}
+
+// Default slot: the preset (= default channel) name hashes to a 0-based slot,
+// exactly as Meshtastic firmware picks it when no explicit slot is configured.
+inline float presetFreq(const Region& r, const Preset& p) {
+  uint32_t slot = djb2(p.name) % (uint32_t)numChannels(r, p);
+  return slotFreq(r, p, (int)slot + 1);
 }
 
 inline int findPreset(const char* name) {            // -1 if not found

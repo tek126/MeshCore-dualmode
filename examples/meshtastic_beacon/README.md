@@ -108,7 +108,8 @@ Then, over serial or via an admin remote-CLI session, use the `mtbeacon` verbs:
 | `mtbeacon interval <min>` | presence period (1–1440 min, default 30) |
 | `mtbeacon preset <name>` | modem preset: LongFast, LongMod, LongSlow, MediumFast, MediumSlow, ShortFast, ShortSlow, ShortTurbo |
 | `mtbeacon region <name>` | region/country band: US, EU_868, EU_433, ANZ, CN, JP, KR, TW, RU, IN, NZ_865, TH, UA_433, UA_868 (alias `country`) |
-| `mtbeacon freq <MHz\|auto>` | manual frequency override; `auto` re-derives from region+preset |
+| `mtbeacon slot <N\|auto>` | Meshtastic frequency slot (1-based, as the app shows it); `auto` = the channel-name-hash default. For meshes running a non-default slot. |
+| `mtbeacon freq <MHz\|auto>` | manual frequency override (wins over `slot`); `auto` re-derives from region+preset(+slot) |
 | `mtbeacon power <dBm>` | set TX power (−9…22), auto-capped to the region limit |
 | `mtbeacon hops <0-3>` | Meshtastic hop limit for presence + text (**default 0**) |
 | `mtbeacon text <string>` | set the announced text (≤63 chars) |

@@ -37,6 +37,17 @@ int main() {
   float f = freqOf("EU_868", "ShortTurbo");
   CHECK(f >= 869.4f && f <= 869.9f);
 
+  printf("explicit frequency slots (1-based, matches Meshtastic):\n");
+  {
+    const Region& us = REGIONS[findRegion("US")];
+    const Preset& lf = PRESETS[findPreset("LongFast")];
+    CHECK(numChannels(us, lf) == 104);                  // 902-928 MHz / 250 kHz
+    CHECK(near(slotFreq(us, lf, 20), 906.875f));        // US LongFast default = slot 20
+    CHECK(near(slotFreq(us, lf, 1), 902.125f));         // first slot
+    CHECK(near(slotFreq(us, lf, 104), 927.875f));       // last slot
+    CHECK(near(presetFreq(us, lf), slotFreq(us, lf, 20)));  // auto == default slot
+  }
+
   printf("table lookups (case-insensitive):\n");
   CHECK(findPreset("longfast") == 0);
   CHECK(findPreset("ShortTurbo") == 7);
