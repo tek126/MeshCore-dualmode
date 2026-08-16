@@ -1837,10 +1837,11 @@ void MyMesh::handleCmdFrame(size_t len) {
     {
       char pv[128];
       int pn = snprintf(pv, sizeof(pv),
-                        "mt.presence:%d,mt.interval:%d,mt.position:%d,mt.precision:%d,mt.region:%s,mt.preset:%s",
+                        "mt.presence:%d,mt.interval:%d,mt.position:%d,mt.precision:%d,mt.region:%s,mt.preset:%s,mt.slot:%d",
                         _beacon.enabled() ? 1 : 0, (int)_beacon.interval(),
                         _beacon.positionOn() ? 1 : 0, (int)_beacon.precision(),
-                        _beacon.regionName(), _beacon.presetName());
+                        _beacon.regionName(), _beacon.presetName(),
+                        (int)_beacon.freqSlot());
       bool need_comma = (dp != (char *)&out_frame[1]);
       if (pn > 0 && (dp - (char *)out_frame) + (need_comma ? 1 : 0) + pn < MAX_FRAME_SIZE) {
         if (need_comma) *dp++ = ',';
@@ -2343,6 +2344,8 @@ bool MyMesh::applyPresenceVar(const char* name, const char* value, char* reply) 
     snprintf(cmd, sizeof(cmd), "mtbeacon region %.20s", value);
   else if (strcmp(name, "mt.preset") == 0)
     snprintf(cmd, sizeof(cmd), "mtbeacon preset %.20s", value);
+  else if (strcmp(name, "mt.slot") == 0)   // 0 = auto (default frequency slot)
+    snprintf(cmd, sizeof(cmd), "mtbeacon slot %d", atoi(value));
   else
     return false;   // unknown mt.* key
   // handleCommand returns true for any mtbeacon verb but writes an "Error: ..."

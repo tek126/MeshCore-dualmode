@@ -61,6 +61,7 @@ the app.
 | `mt.precision` | `0`, `10`–`32` | The location accuracy (32 = exact, 0 = off). |
 | `mt.region` | `US`, `EU_868`, and others | The Meshtastic region and band. |
 | `mt.preset` | `LongFast`, and others | The Meshtastic modem preset. |
+| `mt.slot` | `0`–num. channels | The Meshtastic frequency slot (1-based); `0` = the default slot for the channel. |
 
 Each value goes to the same `mtbeacon` configuration path that the repeater serial
 CLI uses. Thus the firmware refuses a value that is out of range (the app shows an
