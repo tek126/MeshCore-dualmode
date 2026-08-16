@@ -6,6 +6,10 @@
 #include <nrf_soc.h>
 #include "nrf.h"
 
+#ifdef USE_CC310_HW_CRYPTO
+#include <Adafruit_nRFCrypto.h>
+#endif
+
 static BLEDfu bledfu;
 
 // Reset/startup reason, captured on EVERY nRF52 board (not just power-managed
@@ -47,6 +51,11 @@ void NRF52Board::begin() {
   } else {
     NRF_POWER->RESETREAS = 0xFFFFFFFF;   // write 1s to clear
   }
+
+  #ifdef USE_CC310_HW_CRYPTO
+    // CC310 TRNG is higher quality and environment-independent vs radio RSSI noise.
+    nRFCrypto.begin();
+  #endif
 }
 
 // Nordic hardware watchdog. Counts even while the CPU sleeps (WFE), pauses
@@ -382,6 +391,10 @@ void NRF52Board::shutdownPeripherals() {
   if(sensors.getLocationProvider() != NULL) {
     sensors.getLocationProvider()->stop();
   }
+
+#ifdef USE_CC310_HW_CRYPTO
+    nRFCrypto.end();
+#endif
 
   // Flush serial buffers
   Serial.flush();

@@ -34,6 +34,7 @@
 #include <helpers/StatsFormatHelper.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/RegionMap.h>
+#include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
 #include "ChannelBlocker.h"
 
@@ -79,7 +80,7 @@ struct NeighbourInfo {
 };
 
 #ifndef FIRMWARE_BUILD_DATE
-  #define FIRMWARE_BUILD_DATE   "9 Aug 2026"
+  #define FIRMWARE_BUILD_DATE   "14 Aug 2026"
 #endif
 
 // Fallbacks only: the *_carnode envs override FIRMWARE_VERSION with the git
@@ -88,11 +89,11 @@ struct NeighbourInfo {
 // still reports something truthful.
 #ifndef FIRMWARE_VERSION
   #ifdef WITH_MT_BEACON
-    #define FIRMWARE_VERSION   "v1.17.0+mtbeacon-0.2.7"
+    #define FIRMWARE_VERSION   "v1.17.1+mtbeacon-0.2.7"
   #elif defined(WITH_CAR_NODE)
-    #define FIRMWARE_VERSION   "v1.17.0+carnode-0.2.9"
+    #define FIRMWARE_VERSION   "v1.17.1+carnode-0.2.9"
   #else
-    #define FIRMWARE_VERSION   "v1.17.0"
+    #define FIRMWARE_VERSION   "v1.17.1"
   #endif
 #endif
 
