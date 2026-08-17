@@ -1830,6 +1830,24 @@ void MyMesh::handleCmdFrame(size_t len) {
       strcpy(dp, sensors.getSettingValue(i));
       dp = strchr(dp, 0);
     }
+    // External LoRa FEM gain knobs (LNA / PA), same settings the repeater CLI
+    // exposes as 'radio.fem.rxgain' / 'radio.fem.txgain'. Advertised only on
+    // boards whose FEM can actually be switched, so other boards never show a
+    // dead knob. Values report the board's LIVE state, not the pref.
+    {
+      char fv[64]; int fn = 0;
+      if (board.canControlLoRaFemLna())
+        fn += snprintf(fv + fn, sizeof(fv) - fn, "%sradio.fem.rxgain:%d",
+                       fn ? "," : "", board.isLoRaFemLnaEnabled() ? 1 : 0);
+      if (board.canControlLoRaFemPaGain())
+        fn += snprintf(fv + fn, sizeof(fv) - fn, "%sradio.fem.txgain:%d",
+                       fn ? "," : "", board.isLoRaFemPaGainEnabled() ? 1 : 0);
+      bool need_comma = (dp != (char *)&out_frame[1]);
+      if (fn > 0 && (dp - (char *)out_frame) + (need_comma ? 1 : 0) + fn < MAX_FRAME_SIZE) {
+        if (need_comma) *dp++ = ',';
+        memcpy(dp, fv, fn); dp += fn;
+      }
+    }
 #ifdef WITH_MT_PRESENCE
     // Advertise the Meshtastic-presence settings as custom vars too, so they show
     // up (and are editable) in the phone app with no app-side changes. Bounded so
@@ -1856,6 +1874,23 @@ void MyMesh::handleCmdFrame(size_t len) {
     char *np = strchr(sp, ':'); // look for separator char
     if (np) {
       *np++ = 0; // modify 'cmd_frame', replace ':' with null
+      if (strcmp(sp, "radio.fem.rxgain") == 0 || strcmp(sp, "radio.fem.txgain") == 0) {
+        // FEM gain: apply to the hardware first, persist only what the board
+        // accepted (mirrors the repeater CLI's radio.fem.* handling).
+        bool is_rx = (strcmp(sp, "radio.fem.rxgain") == 0);
+        bool en = atoi(np) != 0;
+        bool ok = is_rx
+            ? (board.canControlLoRaFemLna() && board.setLoRaFemLnaEnabled(en))
+            : (board.canControlLoRaFemPaGain() && board.setLoRaFemPaGainEnabled(en));
+        if (ok) {
+          if (is_rx) _prefs.radio_fem_rxgain = en ? 1 : 0;
+          else       _prefs.radio_fem_txgain = en ? 1 : 0;
+          savePrefs();
+          writeOKFrame();
+        } else {
+          writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+        }
+      } else
 #ifdef WITH_MT_PRESENCE
       if (strncmp(sp, "mt.", 3) == 0) {   // Meshtastic-presence var: route to the beacon
         char rep[160];

@@ -5,8 +5,9 @@ in the node list, and on the map if you permit it. It does not send a Meshtastic
 chat message. It uses the beacon engine from the repeater
 (`examples/meshtastic_beacon`) in a presence-only mode.
 
-Build it with `-D WITH_MT_PRESENCE`. For an example env, see
-`Heltec_t114_companion_radio_ble_mtpresence` in `variants/heltec_t114/platformio.ini`.
+Build it with `-D WITH_MT_PRESENCE`. For example envs, see
+`Heltec_t114_companion_radio_ble_mtpresence` in `variants/heltec_t114/platformio.ini`
+and `heltec_v4_companion_radio_ble_mtpresence` in `variants/heltec_v4/platformio.ini`.
 
 ## What it does
 
@@ -66,6 +67,21 @@ the app.
 Each value goes to the same `mtbeacon` configuration path that the repeater serial
 CLI uses. Thus the firmware refuses a value that is out of range (the app shows an
 error), and it keeps a good value in the `/mtbeacon` file.
+
+### External LoRa FEM gain (LNA / PA)
+
+Boards with a switchable LoRa front-end module (for example, the Heltec V4 LNA)
+show two more variables in the same list. These are not presence settings — they
+show in every companion build on such a board:
+
+| Variable | Values | Function |
+|---|---|---|
+| `radio.fem.rxgain` | `0` / `1` | The external RX LNA. The default is on. |
+| `radio.fem.txgain` | `0` / `1` | The external TX PA gain, on boards that have it. |
+
+These are the same settings the repeater CLI names `radio.fem.rxgain` and
+`radio.fem.txgain`. The value applies to the hardware immediately, persists, and
+applies again at boot. A board with no switchable FEM does not show the variables.
 
 ## Limits
 
