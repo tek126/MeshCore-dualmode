@@ -1,4 +1,4 @@
-// Dual-mode launcher for the Seeed T1000-E.
+// Dual-mode launcher (nRF52: Seeed T1000-E; ESP32-S3: Heltec V4).
 //
 // Co-compiles the stock simple_repeater and companion_radio apps into one
 // firmware and chooses which one to run at boot based on a flag persisted in
@@ -10,10 +10,15 @@
 // setup()/loop().
 
 #include <Arduino.h>
-#include <InternalFileSystem.h>
+#if defined(NRF52_PLATFORM)
+  #include <InternalFileSystem.h>
+  using namespace Adafruit_LittleFS_Namespace;
+#elif defined(ESP32)
+  #include <SPIFFS.h>
+#else
+  #error "dualmode supports NRF52 and ESP32 targets only"
+#endif
 #include "Button.h"   // from companion_radio/ui-orig (on the include path)
-
-using namespace Adafruit_LittleFS_Namespace;
 
 #ifndef PIN_USER_BTN
   #error "dualmode requires PIN_USER_BTN"
@@ -33,6 +38,7 @@ enum AppMode { MODE_COMPANION = 0, MODE_REPEATER = 1 };
 static const char* MODE_PATH = "/dualmode";
 static AppMode g_mode = MODE_COMPANION;
 
+#if defined(NRF52_PLATFORM)
 static AppMode readMode() {
   InternalFS.begin();   // idempotent; the chosen app calls begin() again later
   AppMode m = MODE_COMPANION;
@@ -54,6 +60,28 @@ static void writeMode(AppMode m) {
     f.close();
   }
 }
+#elif defined(ESP32)
+static AppMode readMode() {
+  SPIFFS.begin(true);   // idempotent; the chosen app calls begin() again later
+  AppMode m = MODE_COMPANION;
+  fs::File f = SPIFFS.open(MODE_PATH, "r");
+  if (f) {
+    int c = f.read();
+    if (c == 'R') m = MODE_REPEATER;
+    f.close();
+  }
+  return m;
+}
+
+static void writeMode(AppMode m) {
+  SPIFFS.begin(true);
+  fs::File f = SPIFFS.open(MODE_PATH, "w");
+  if (f) {
+    f.write((uint8_t)(m == MODE_REPEATER ? 'R' : 'C'));
+    f.close();
+  }
+}
+#endif
 
 static Button mode_btn(PIN_USER_BTN, USER_BTN_PRESSED);
 
@@ -127,7 +155,11 @@ static void onModeSwitch() {
   writeMode(target);
   confirmFeedback(target == MODE_REPEATER ? 2 : 1);
   delay(150);            // let the flash write settle
+#if defined(NRF52_PLATFORM)
   NVIC_SystemReset();    // does not return
+#else
+  ESP.restart();         // does not return
+#endif
 }
 
 void setup() {
@@ -153,12 +185,16 @@ void setup() {
 }
 
 void loop() {
+#if defined(NRF52_PLATFORM)
   // Feed the hardware watchdog if one is running. The repeater arms it in
   // rpt_setup(), and on nRF52 the WDT SURVIVES the mode-switch soft reset —
   // without this, switching repeater -> companion would leave it running and
   // unfed, resetting the node ~90s later. Feeding a stopped WDT is a no-op,
   // and as a bonus a hung companion loop now self-recovers too.
   NRF_WDT->RR[0] = WDT_RR_RR_Reload;
+#endif
+  // (No equivalent on ESP32: the repeater's 90s hardware watchdog is
+  // NRF52-only, and the ESP32 task WDT does not survive ESP.restart().)
 
   mode_btn.update();
 
