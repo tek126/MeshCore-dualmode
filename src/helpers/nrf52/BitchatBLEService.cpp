@@ -28,11 +28,6 @@ static const uint8_t BITCHAT_CHARACTERISTIC_UUID_BYTES[] = {
 // Singleton instance for static callback access
 BitchatBLEService* BitchatBLEService::_instance = nullptr;
 
-// Static buffers to keep everything out of heap allocation
-BitchatBLEService::QueuedMessage BitchatBLEService::_messageQueue[MESSAGE_QUEUE_SIZE];
-uint8_t BitchatBLEService::_writeBuffer[1024];
-uint8_t BitchatBLEService::_parseBuffer[1024];
-BitchatBLEService::TxSlot BitchatBLEService::_txQueue[TX_QUEUE_SIZE];
 
 BitchatBLEService::BitchatBLEService()
     : _service(BITCHAT_SERVICE_UUID_BYTES)
@@ -212,7 +207,7 @@ void BitchatBLEService::processIncomingLocked() {
     // Parse ALL complete messages in the snapshot
     size_t consumed = 0;
     while (consumed < snapLen) {
-        BitchatMessage msg;
+        BitchatMessage& msg = _parseMsg;
         size_t remaining = snapLen - consumed;
 
         if (!BitchatProtocol::parseMessage(_parseBuffer + consumed, remaining, msg)) {
@@ -385,12 +380,12 @@ void BitchatBLEService::onCharacteristicWrite(uint16_t conn_handle, BLECharacter
 
     // Append to write buffer
     size_t copyLen = len;
-    if (_instance->_writeBufferOffset + copyLen > sizeof(_writeBuffer)) {
+    if (_instance->_writeBufferOffset + copyLen > sizeof(_instance->_writeBuffer)) {
         _instance->clearWriteBufferLocked();
-        copyLen = (len > sizeof(_writeBuffer)) ? sizeof(_writeBuffer) : len;
+        copyLen = (len > sizeof(_instance->_writeBuffer)) ? sizeof(_instance->_writeBuffer) : len;
     }
 
-    memcpy(&_writeBuffer[_instance->_writeBufferOffset], data, copyLen);
+    memcpy(&_instance->_writeBuffer[_instance->_writeBufferOffset], data, copyLen);
     _instance->_writeBufferOffset += copyLen;
     taskEXIT_CRITICAL();
 }

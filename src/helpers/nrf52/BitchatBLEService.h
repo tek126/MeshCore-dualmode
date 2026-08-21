@@ -106,14 +106,14 @@ private:
 
     // Write buffer for reassembling fragmented BLE writes
     // 1024 bytes to handle long messages that compress to ~615 bytes (2 fragments)
-    // Made static to keep 1KB out of heap allocation
-    static uint8_t _writeBuffer[1024];
+    uint8_t _writeBuffer[1024];
     size_t _writeBufferOffset;
     uint32_t _lastWriteTime;
     static const uint32_t WRITE_TIMEOUT_MS = 5000;
 
     // Parse-side snapshot (loop task only), filled under the critical section
-    static uint8_t _parseBuffer[1024];
+    uint8_t _parseBuffer[1024];
+    BitchatMessage _parseMsg;   // parse scratch: keeps ~1.2KB off the 4KB loop stack
 
     // Message queue for deferred processing (incoming)
     // Reduced from 8 to 2 to save ~13KB heap (each BitchatMessage is ~2KB)
@@ -122,8 +122,7 @@ private:
         BitchatMessage msg;
         bool valid;
     };
-    // Static to keep out of heap allocation
-    static QueuedMessage _messageQueue[MESSAGE_QUEUE_SIZE];
+    QueuedMessage _messageQueue[MESSAGE_QUEUE_SIZE];
     size_t _queueHead;
     size_t _queueTail;
 
@@ -138,7 +137,7 @@ private:
         uint16_t len;
         bool valid;
     };
-    static TxSlot _txQueue[TX_QUEUE_SIZE];  // static: ~2.8KB out of heap
+    TxSlot _txQueue[TX_QUEUE_SIZE];
     size_t _txHead;
     size_t _txTail;
     uint32_t _lastNotifyTime;

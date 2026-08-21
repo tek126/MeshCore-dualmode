@@ -191,8 +191,10 @@ private:
     BitchatBLEService _bleService;
 #endif
 
-    // Static to keep ~1.2KB out of heap allocation
-    static BitchatDuplicateCache _duplicateCache;
+    // Regular member: the whole bridge object is heap-allocated once when
+    // the bridge starts, so these buffers cost nothing when it does not
+    // (in a DUALMODE build, companion mode never pays for them).
+    BitchatDuplicateCache _duplicateCache;
 
     // Bitchat peer identity (derived from Meshcore identity)
     uint64_t _bitchatPeerId;
@@ -224,8 +226,7 @@ private:
     static const uint32_t ANNOUNCE_INTERVAL_CONNECTED_MS = 15000;  // 15 seconds when client connected
 
     // Fragment reassembly deferred processing (to avoid re-entrant call chains)
-    // Static to keep ~1.1KB out of heap allocation
-    static BitchatMessage _reassembledMsg;  // Buffer for reassembled message awaiting processing
+    BitchatMessage _reassembledMsg;  // Buffer for reassembled message awaiting processing
     bool _hasReassembledMsg;         // True when _reassembledMsg contains a message to process
 
     // Time synchronization (calibrated from received Bitchat packets)
@@ -233,6 +234,18 @@ private:
     int64_t _timeOffset;      // Offset to add to millis() to get Unix time (ms)
     bool _timeSynced;         // True after receiving at least one valid timestamp from Android
     uint64_t _bootTimestamp;  // Unix timestamp (ms) when time was first synced (used to filter old messages)
+
+    // Scratch buffers (were file-scope statics; now live inside the
+    // heap-allocated bridge object). Loop-task context only.
+    BitchatMessage g_msgBuffer;           // announcements / outgoing messages
+    BitchatMessage g_pongBuffer;          // PING responses
+    BitchatMessage g_reassembledBuffer;   // fragment reassembly
+    uint8_t g_signData[512];              // message signing
+    uint8_t g_reassembledData[2048];      // fragment data
+    char g_senderNick[64];                // message parsing
+    char g_messageContent[2048];          // message content
+    char g_channelName[32];               // channel name
+    char g_meshTxContent[200];            // mesh->bitchat relay
 
     // Statistics
     uint32_t _messagesRelayed;
@@ -251,8 +264,7 @@ private:
     };
     static const size_t MESSAGE_HISTORY_SIZE = 8;
     static const uint32_t MESSAGE_EXPIRY_MS = 300000;  // 5 minutes
-    // Static to keep ~17KB out of heap allocation (8 * ~2KB BitchatMessage)
-    static CachedMessage _messageHistory[MESSAGE_HISTORY_SIZE];
+    CachedMessage _messageHistory[MESSAGE_HISTORY_SIZE];
     size_t _messageHistoryHead;
 
     /**
@@ -311,8 +323,7 @@ private:
         bool valid;
     };
     static const size_t PEER_CACHE_SIZE = 32;
-    // Static to keep ~1KB out of heap allocation
-    static PeerInfo _peerCache[PEER_CACHE_SIZE];
+    PeerInfo _peerCache[PEER_CACHE_SIZE];
 
     // Fragment reassembly buffers for long messages
     // Bitchat fragments messages >245 bytes into multiple FRAGMENT messages
@@ -335,8 +346,7 @@ private:
     };
     static const size_t MAX_FRAGMENT_BUFFERS = 4;  // Reduced from 16 to save memory
     static const uint32_t FRAGMENT_TIMEOUT_MS = 10000;  // 10 second timeout
-    // Static to keep ~8KB out of heap (4 * ~2KB each)
-    static FragmentBuffer _fragmentBuffers[MAX_FRAGMENT_BUFFERS];
+    FragmentBuffer _fragmentBuffers[MAX_FRAGMENT_BUFFERS];
 
     /**
      * Handle incoming fragment message
@@ -461,8 +471,7 @@ private:
     static const size_t MAX_PENDING_PARTS = 8;  // Queue size (parts 2-8 queued, part 1 sent immediately)
     static const size_t MAX_MESSAGE_PARTS = 8;  // Max parts per message (~1KB) - more is unreliable over LoRa
     static const uint32_t PART_SEND_DELAY_MS = 15000;  // Delay between parts (15s for LoRa reliability)
-    // Static to keep ~2KB out of heap
-    static PendingPart _pendingParts[MAX_PENDING_PARTS];
+    PendingPart _pendingParts[MAX_PENDING_PARTS];
     size_t _pendingPartsHead;        // Next part to send
     size_t _pendingPartsTail;        // Next slot to queue into
     uint32_t _lastPartSentTime;      // millis() when last part was sent

@@ -12,6 +12,7 @@
 #include <Arduino.h>
 #if defined(NRF52_PLATFORM)
   #include <InternalFileSystem.h>
+  #include <helpers/nrf52/SafeInternalFS.h>
   using namespace Adafruit_LittleFS_Namespace;
 #elif defined(ESP32)
   #include <SPIFFS.h>
@@ -40,7 +41,10 @@ static AppMode g_mode = MODE_COMPANION;
 
 #if defined(NRF52_PLATFORM)
 static AppMode readMode() {
-  InternalFS.begin();   // idempotent; the chosen app calls begin() again later
+  // Guarded mount: a mount failure must never auto-format (see SafeInternalFS.h).
+  // The flag file is a convenience — on a refused mount, default the mode and
+  // let the chosen app's own guarded mount halt loudly if the fault persists.
+  if (!safeInternalFSBegin()) return MODE_COMPANION;
   AppMode m = MODE_COMPANION;
   File f(InternalFS);
   if (f.open(MODE_PATH, FILE_O_READ)) {
@@ -52,7 +56,7 @@ static AppMode readMode() {
 }
 
 static void writeMode(AppMode m) {
-  InternalFS.begin();
+  if (!safeInternalFSBegin()) return;   // refuse to touch a filesystem that won't mount
   InternalFS.remove(MODE_PATH);
   File f(InternalFS);
   if (f.open(MODE_PATH, FILE_O_WRITE)) {

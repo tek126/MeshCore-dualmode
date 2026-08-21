@@ -14,7 +14,12 @@
   #include <helpers/nrf52/EthernetCLI.h>
 #endif
 
+#ifdef NRF52_PLATFORM
+  #include <helpers/nrf52/SafeInternalFS.h>
+#endif
+
 #if defined(ENABLE_BITCHAT) && (defined(ESP32) || defined(NRF52_PLATFORM))
+  #include <new>
   #include <helpers/bitchat/BitchatBridge.h>
   #ifdef ESP32
     #include <esp_task_wdt.h>
@@ -93,7 +98,11 @@ void setup() {
 
   FILESYSTEM* fs;
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+ #if defined(NRF52_PLATFORM)
+  if (!safeInternalFSBegin()) haltFSMountFailed();  // never auto-format existing data
+ #else
   InternalFS.begin();
+ #endif
   fs = &InternalFS;
   IdentityStore store(InternalFS, "");
 #elif defined(ESP32)
@@ -154,7 +163,11 @@ void setup() {
   // author found reliable). In a DUALMODE build the companion half's phone BLE
   // never conflicts: only one mode runs per boot. Must start after
   // the_mesh.begin() so the channel registry and node name are loaded.
-  bitchat_bridge = new BitchatBridge(the_mesh, the_mesh.self_id, the_mesh.getNodeName());
+  // nothrow: if the ~45KB bridge object doesn't fit, run as a plain repeater
+  bitchat_bridge = new (std::nothrow) BitchatBridge(the_mesh, the_mesh.self_id, the_mesh.getNodeName());
+  if (bitchat_bridge == nullptr) {
+    Serial.println("ERROR: BitchatBridge allocation failed - bridge disabled");
+  }
   if (bitchat_bridge != nullptr) {
     bitchat_bridge->begin();
     if (bitchat_bridge->beginStandalone(the_mesh.getNodeName())) {

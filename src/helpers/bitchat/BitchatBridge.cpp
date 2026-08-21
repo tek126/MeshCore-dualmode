@@ -63,26 +63,8 @@ static void dumpPacketHex(const char* label, const uint8_t* data, size_t len) {
   #define STACK_CHECKPOINT(label) {}
 #endif
 
-// Static member definitions to keep large buffers out of heap allocation
-BitchatBridge::CachedMessage BitchatBridge::_messageHistory[MESSAGE_HISTORY_SIZE];
-BitchatBridge::FragmentBuffer BitchatBridge::_fragmentBuffers[MAX_FRAGMENT_BUFFERS];
-BitchatBridge::PendingPart BitchatBridge::_pendingParts[MAX_PENDING_PARTS];
-BitchatDuplicateCache BitchatBridge::_duplicateCache;
-BitchatMessage BitchatBridge::_reassembledMsg;
-BitchatBridge::PeerInfo BitchatBridge::_peerCache[PEER_CACHE_SIZE];
 
 
-// Module-scope static buffers (moved from function scope for stack safety on NRF52)
-// These buffers are truly outside the stack and re-entrant safe
-static BitchatMessage g_msgBuffer;           // For announcements/messages
-static BitchatMessage g_pongBuffer;          // For PING responses
-static BitchatMessage g_reassembledBuffer;   // For fragment reassembly
-static uint8_t g_signData[512];              // For message signing
-static uint8_t g_reassembledData[2048];      // For fragment data
-static char g_senderNick[64];                // For message parsing
-static char g_messageContent[2048];          // For message content
-static char g_channelName[32];               // For channel name
-static char g_meshTxContent[200];            // For mesh→bitchat relay
 
 // PKCS#7 padding for Bitchat protocol signing (must match Android/iOS)
 // Block sizes: 256, 512, 1024, 2048 bytes
@@ -145,6 +127,12 @@ BitchatBridge::BitchatBridge(mesh::Mesh& mesh, mesh::LocalIdentity& identity, co
     , _messageHistoryHead(0)
 {
     memset(_defaultChannelName, 0, sizeof(_defaultChannelName));
+    memset(g_signData, 0, sizeof(g_signData));
+    memset(g_reassembledData, 0, sizeof(g_reassembledData));
+    memset(g_senderNick, 0, sizeof(g_senderNick));
+    memset(g_messageContent, 0, sizeof(g_messageContent));
+    memset(g_channelName, 0, sizeof(g_channelName));
+    memset(g_meshTxContent, 0, sizeof(g_meshTxContent));
     strcpy(_defaultChannelName, "mesh");  // Default channel
     memset(&_meshcoreChannel, 0, sizeof(_meshcoreChannel));
     memset(_noisePublicKey, 0, sizeof(_noisePublicKey));
@@ -530,22 +518,19 @@ void BitchatBridge::loop() {
         }
     }
 
-    // Always send periodic announcements - don't check if service is active
-    // This ensures announcements resume after MeshCore app disconnects
-    // BLE notification will go out whether or not anyone is listening
-    // Use shorter interval when we know a client has interacted
-    bool hasClient = _bleService.hasConnectedClient();
-    uint32_t interval = hasClient
-        ? ANNOUNCE_INTERVAL_CONNECTED_MS
-        : ANNOUNCE_INTERVAL_MS;
-
-    uint32_t elapsed = now - _lastAnnounceTime;
-
-    if (elapsed >= interval) {
-        BITCHAT_DEBUG_PRINTLN("Sending periodic announcement (interval=%lu, elapsed=%lu)",
-            interval, elapsed);
-        sendPeerAnnouncement();
-        _lastAnnounceTime = now;
+    // Periodic announcements only while a client is connected. Discovery is
+    // the GAP advertisement's job; a GATT announce with nobody subscribed is
+    // pure wasted work — and each announce does an Ed25519 signature deep on
+    // the loop-task stack, which idles best left un-run every 4 seconds.
+    // On connect, _pendingAnnounce (set by the connect callback) sends the
+    // first announce immediately.
+    if (_bleService.hasConnectedClient()) {
+        uint32_t elapsed = now - _lastAnnounceTime;
+        if (elapsed >= ANNOUNCE_INTERVAL_CONNECTED_MS) {
+            BITCHAT_DEBUG_PRINTLN("Sending periodic announcement (elapsed=%lu)", elapsed);
+            sendPeerAnnouncement();
+            _lastAnnounceTime = now;
+        }
     }
 #endif
 }

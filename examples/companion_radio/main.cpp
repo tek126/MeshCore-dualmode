@@ -67,6 +67,9 @@ MultiSerialInterface interface_manager;
 // platform file system
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   #include <InternalFileSystem.h>
+  #if defined(NRF52_PLATFORM)
+    #include <helpers/nrf52/SafeInternalFS.h>
+  #endif
   #if defined(QSPIFLASH)
     #include <CustomLFS_QSPIFlash.h>
     DataStore store(InternalFS, QSPIFlash, rtc_clock);
@@ -143,7 +146,11 @@ void setup() {
   fast_rng.begin(radio_driver.getRngSeed());
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+ #if defined(NRF52_PLATFORM)
+  if (!safeInternalFSBegin()) haltFSMountFailed();  // never auto-format existing data
+ #else
   InternalFS.begin();
+ #endif
   #if defined(QSPIFLASH)
     if (!QSPIFlash.begin()) {
       // debug output might not be available at this point, might be too early. maybe should fall back to InternalFS here?

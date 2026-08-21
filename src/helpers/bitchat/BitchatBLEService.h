@@ -165,6 +165,7 @@ private:
     // Parse-side snapshot of the write buffer (loop() context only). Filled
     // under _mux, parsed with the lock released.
     uint8_t _parseBuffer[1024];
+    BitchatMessage _parseMsg;   // parse scratch: keeps the big struct off the loop stack
 
     // Message queue for deferred processing (filled and drained on the loop
     // task only — parsing happens in loop(), never in the BLE callback)

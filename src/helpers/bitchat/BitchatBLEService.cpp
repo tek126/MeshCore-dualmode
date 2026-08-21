@@ -303,7 +303,7 @@ void BitchatBLEService::processIncomingLocked() {
     size_t consumed = 0;
     int msgCount = 0;
     while (consumed < snapLen) {
-        BitchatMessage msg;
+        BitchatMessage& msg = _parseMsg;
         size_t remaining = snapLen - consumed;
 
         if (!BitchatProtocol::parseMessage(_parseBuffer + consumed, remaining, msg)) {
