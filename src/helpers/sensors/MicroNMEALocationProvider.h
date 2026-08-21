@@ -4,6 +4,7 @@
 #include <MicroNMEA.h>
 #include <RTClib.h>
 #include <helpers/RefCountedDigitalPin.h>
+#include <helpers/TimeSanity.h>
 
 #ifndef GPS_EN
     #ifdef PIN_GPS_EN
@@ -153,9 +154,18 @@ public :
             }
             if (_time_sync_needed && time_valid > 2) {
                 if (_clock != NULL) {
-                    _clock->setCurrentTime(getTimestamp());
-                    _time_sync_needed = false;
-                    _last_time_sync = millis();
+                    // Cold-starting receivers can emit valid-flagged sentences whose
+                    // time-of-day is right but whose DATE is garbage (weeks default /
+                    // rollover artifacts, observed decades in the future).  Only let
+                    // GPS set the clock when the claimed date is plausible.
+                    long ts = getTimestamp();
+                    if ((uint32_t)ts >= time_sanity::BUILD_EPOCH && time_sanity::plausible((uint32_t)ts)) {
+                        _clock->setCurrentTime(ts);
+                        _time_sync_needed = false;
+                        _last_time_sync = millis();
+                    } else {
+                        time_valid = 0;  // garbage date: require a fresh valid streak before retrying
+                    }
                 }
             }
             if (isValid()) {

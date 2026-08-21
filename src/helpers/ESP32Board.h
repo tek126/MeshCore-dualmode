@@ -2,6 +2,7 @@
 
 #include <MeshCore.h>
 #include <Arduino.h>
+#include <helpers/TimeSanity.h>
 
 #ifndef USER_BTN_PRESSED
 #define USER_BTN_PRESSED LOW
@@ -202,13 +203,22 @@ public:
   ESP32RTCClock() { }
   void begin() {
     esp_reset_reason_t reason = esp_reset_reason();
-    if (reason == ESP_RST_POWERON) {
+    time_t restored;
+    time(&restored);
+    // On a soft reset the system time is reconstructed from the RTC domain
+    // (counter + stored records).  A brownout can corrupt those records, after
+    // which every soft reset restores a time years off (and only a full power
+    // removal would ever clear it) -- so sanity-check the restored value on
+    // EVERY boot, not just power-on.
+    if (reason == ESP_RST_POWERON
+        || (uint32_t)restored < 1715770351UL
+        || !time_sanity::plausible((uint32_t)restored)) {
       // start with some date/time in the recent past
       struct timeval tv;
       tv.tv_sec = 1715770351;  // 15 May 2024, 8:50pm
-    tv.tv_usec = 0;
-    settimeofday(&tv, NULL);
-  }
+      tv.tv_usec = 0;
+      settimeofday(&tv, NULL);
+    }
   }
   uint32_t getCurrentTime() override {
     time_t _now;

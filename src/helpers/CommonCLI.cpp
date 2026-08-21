@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "CommonCLI.h"
+#include "TimeSanity.h"
 #include "TxtDataHelpers.h"
 #include "AdvertDataHelpers.h"
 #include "TxtDataHelpers.h"
@@ -213,7 +214,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       strcpy(reply, "OK - Advert sent");
     } else if (memcmp(command, "clock sync", 10) == 0) {
       uint32_t curr = getRTCClock()->getCurrentTime();
-      if (sender_timestamp > curr) {
+      if (!time_sanity::plausible(sender_timestamp)) {
+        strcpy(reply, "ERR: clock source implausibly far ahead");
+      } else if (sender_timestamp > curr || !time_sanity::plausible(curr)) {
+        // forward sync -- or backward, as recovery when the current clock is implausible
         getRTCClock()->setCurrentTime(sender_timestamp + 1);
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);
@@ -232,7 +236,10 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "time ", 5) == 0) {  // set time (to epoch seconds)
       uint32_t secs = _atoi(&command[5]);
       uint32_t curr = getRTCClock()->getCurrentTime();
-      if (secs > curr) {
+      if (!time_sanity::plausible(secs)) {
+        strcpy(reply, "(ERR: implausibly far ahead)");
+      } else if (secs > curr || !time_sanity::plausible(curr)) {
+        // forward set -- or backward, as recovery when the current clock is implausible
         getRTCClock()->setCurrentTime(secs);
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);

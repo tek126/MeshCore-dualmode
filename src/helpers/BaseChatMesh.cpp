@@ -1,4 +1,5 @@
 #include <helpers/BaseChatMesh.h>
+#include <helpers/TimeSanity.h>
 #include <Utils.h>
 
 #ifndef SERVER_RESPONSE_DELAY
@@ -58,7 +59,9 @@ void BaseChatMesh::sendAckTo(const ContactInfo& dest, const uint8_t* ack_hash, u
 void BaseChatMesh::bootstrapRTCfromContacts() {
   uint32_t latest = 0;
   for (int i = 0; i < num_contacts; i++) {
-    if (contacts[i].lastmod > latest) {
+    // ignore implausible lastmod values -- a contact record stamped during a
+    // clock excursion would otherwise re-poison the clock on every boot
+    if (contacts[i].lastmod > latest && time_sanity::plausible(contacts[i].lastmod)) {
       latest = contacts[i].lastmod;
     }
   }

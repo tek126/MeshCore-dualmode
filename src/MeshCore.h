@@ -107,10 +107,12 @@ public:
 
   uint32_t getCurrentTimeUnique() {
     uint32_t t = getCurrentTime();
-    if (t <= last_unique) {
-      return ++last_unique;
-    }
-    return last_unique = t;
+    if (t > last_unique) return last_unique = t;
+    // uniqueness only needs to disambiguate calls within the same second; if
+    // the clock has been corrected back after a far-future excursion, re-anchor
+    // instead of stamping years-ahead times into every outgoing packet
+    if (last_unique - t > 86400UL) return last_unique = t;
+    return ++last_unique;
   }
 };
 
