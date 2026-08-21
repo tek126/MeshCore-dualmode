@@ -2,6 +2,10 @@
 #include "MyMesh.h"
 #include <algorithm>
 
+#ifdef ENABLE_BITCHAT
+#include <helpers/bitchat/BitchatBridge.h>
+#endif
+
 #if defined(WITH_MT_BEACON) || defined(WITH_CAR_NODE)
 extern RADIO_CLASS radio;   // concrete RadioLib radio (defined in the variant target.cpp)
 #endif
@@ -966,6 +970,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _cli.loadPrefs(_fs);
   acl.load(_fs, self_id);
   _blocker.begin(_fs);
+#ifdef ENABLE_BITCHAT
+  _bitchatChans.begin(_fs);
+#endif
 
 #ifdef WITH_MT_BEACON
   // Derive a stable Meshtastic node number + starting packet id from our pubkey.
@@ -1355,6 +1362,23 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     }
   } else if (_blocker.handleCommand(command, reply, _fs)) {
     // handled by the channel blocklist ("block ..." / "unblock ..." verbs)
+#ifdef ENABLE_BITCHAT
+  } else if (strcmp(command, "bitchat status") == 0) {
+    if (_bitchatBridge == NULL) {
+      strcpy(reply, "bitchat: bridge not running");
+    } else {
+      snprintf(reply, 158, "bitchat: ble=%s client=%s relayed=%lu dup=%lu chans=%d",
+               _bitchatBridge->isBLEActive() ? "up" : "down",
+               _bitchatBridge->hasBitchatClient() ? "yes" : "no",
+               (unsigned long)_bitchatBridge->getMessagesRelayed(),
+               (unsigned long)_bitchatBridge->getDuplicatesDropped(),
+               (int)_bitchatChans.count());
+    }
+  } else if (_bitchatChans.handleCommand(command, reply, _fs)) {
+    // handled by the BitChat channel registry ("bitchat ..." verbs);
+    // push any mapping change straight into the bridge
+    if (_bitchatChans.takeDirty()) syncBitchatMappings();
+#endif
 #ifdef WITH_MT_BEACON
   } else if (_beacon.handleCommand(command, reply, _fs)) {
     // handled by the Meshtastic beacon ("mtbeacon ..." verbs)
@@ -1521,3 +1545,55 @@ bool MyMesh::hasPendingWork() const {
 #endif
   return _mgr->getOutboundTotal() > 0;
 }
+
+#ifdef ENABLE_BITCHAT
+/* --------------------------- BitChat bridge ---------------------------- */
+
+int MyMesh::searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel channels[], int max_matches) {
+  return _bitchatChans.findByHash(hash, channels, max_matches);
+}
+
+void MyMesh::onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel,
+                             uint8_t* data, size_t len) {
+  if (_bitchatBridge == NULL || type != PAYLOAD_TYPE_GRP_TXT) return;
+  // GRP_TXT payload: timestamp(4) + txt_type(1) + "sender: text"
+  if (len < 6) return;
+  uint8_t txt_type = data[4];
+  if ((txt_type >> 2) != 0) return;   // attempt bits stripped, plain text only
+
+  uint32_t timestamp;
+  memcpy(&timestamp, data, 4);
+  data[len] = 0;  // buffer is MAX_PACKET_PAYLOAD; make text a C string
+  const char* text = (const char*)&data[5];
+
+  // Split "sender: message" the same way the companion build does
+  const char* colon = strstr(text, ": ");
+  if (colon != NULL && colon > text) {
+    char senderName[40];
+    size_t n = colon - text;
+    if (n >= sizeof(senderName)) n = sizeof(senderName) - 1;
+    memcpy(senderName, text, n);
+    senderName[n] = 0;
+    _bitchatBridge->onMeshcoreGroupMessage(channel, timestamp, senderName, colon + 2);
+  } else {
+    _bitchatBridge->onMeshcoreGroupMessage(channel, timestamp, "Unknown", text);
+  }
+}
+
+void MyMesh::syncBitchatMappings() {
+  if (_bitchatBridge == NULL) return;
+  _bitchatBridge->clearChannelMappings();
+  for (int i = 0; i < BitchatChannels::MAX_CHANNELS; i++) {
+    if (_bitchatChans.slotUsed(i)) {
+      // name(i) includes the leading '#'; the bridge registry stores bare names
+      _bitchatBridge->registerChannelMapping(_bitchatChans.name(i), _bitchatChans.channel(i));
+    }
+  }
+}
+
+void MyMesh::initBitchat(BitchatBridge* bridge) {
+  _bitchatBridge = bridge;
+  _bitchatChans.takeDirty();
+  syncBitchatMappings();
+}
+#endif

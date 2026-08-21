@@ -50,6 +50,11 @@
 extern AbstractBridge* bridge;
 #endif
 
+#ifdef ENABLE_BITCHAT
+#include "BitchatChannels.h"
+class BitchatBridge;   // src/helpers/bitchat — constructed in main.cpp
+#endif
+
 struct RepeaterStats {
   uint16_t batt_milli_volts;
   uint16_t curr_tx_queue_len;
@@ -111,6 +116,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   ClientACL  acl;
   CommonCLI _cli;
   ChannelBlocker _blocker;   // #channels this repeater is configured not to repeat
+#ifdef ENABLE_BITCHAT
+  BitchatChannels _bitchatChans;       // #channels bridged to BitChat over BLE
+  BitchatBridge* _bitchatBridge = nullptr;
+#endif
 #ifdef WITH_MT_BEACON
   MtBeaconControl _beacon;
 #endif
@@ -156,6 +165,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 
   File openAppend(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
+
+#ifdef ENABLE_BITCHAT
+  // Push the current channel registry into the bridge's mapping table
+  void syncBitchatMappings();
+#endif
 
   // Is forwarding currently off? Either the 'set repeat on|off' pref, or -- on a
   // car node -- the park sleep / quiet zone holding it off for now.
@@ -222,6 +236,13 @@ protected:
   bool onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onControlDataRecv(mesh::Packet* packet) override;
 
+#ifdef ENABLE_BITCHAT
+  // Group-channel hooks: base Mesh decrypts GRP_TXT for any channel these
+  // return, then STILL routes the packet — repeating is unaffected.
+  int searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel channels[], int max_matches) override;
+  void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data, size_t len) override;
+#endif
+
   void sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
 public:
@@ -241,6 +262,11 @@ public:
 #endif
 #ifdef WITH_MT_BEACON
   MtBeaconControl* getBeacon() { return &_beacon; }
+#endif
+#ifdef ENABLE_BITCHAT
+  // Called from main.cpp after the bridge is constructed; registers the
+  // persisted channel mappings with it.
+  void initBitchat(BitchatBridge* bridge);
 #endif
 
   void savePrefs() override {

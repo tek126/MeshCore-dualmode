@@ -23,7 +23,10 @@ def git_describe():
     return rev + ("-dirty" if dirty else "")
 
 
-version = "v1.17.1+carnode-%s" % git_describe()
+# Experimental bitchat-bridge envs get their own marker so a `ver` reply (or a
+# phone app's device info) makes it obvious the node runs the experiment.
+_flavor = "carnode-bitchat" if "bitchat" in env["PIOENV"] else "carnode"
+version = "v1.17.1+%s-%s" % (_flavor, git_describe())
 
 try:
     macro = env.StringifyMacro(version)      # portable quoting (PlatformIO)
