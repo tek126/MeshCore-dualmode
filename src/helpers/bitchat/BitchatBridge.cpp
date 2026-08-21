@@ -1116,6 +1116,32 @@ void BitchatBridge::processBitchatMessage(const BitchatMessage& msg) {
                 if (g_channelName[0] == '\0') {
                     snprintf(g_channelName, sizeof(g_channelName), "#%s", _defaultChannelName);
                 }
+
+                // Reply routing: the app has no named channels, so a BitChat
+                // user addresses a non-default MeshCore channel by starting
+                // the message with its tag — "#test hello" relays "hello"
+                // onto #test. Only a tag that matches a mapping routes (and
+                // is stripped); any other leading '#' text passes through
+                // untouched to the default channel.
+                if (isDefaultChannel(g_channelName) && g_messageContent[0] == '#') {
+                    const char* sp = strchr(g_messageContent, ' ');
+                    if (sp != nullptr && sp - g_messageContent >= 2
+                        && (size_t)(sp - g_messageContent) < sizeof(g_channelName)) {
+                        char tag[32];
+                        size_t tagLen = sp - g_messageContent;
+                        memcpy(tag, g_messageContent, tagLen);
+                        tag[tagLen] = '\0';
+                        mesh::GroupChannel tagChannel;
+                        if (findMeshChannel(tag, tagChannel)) {
+                            strcpy(g_channelName, tag);
+                            const char* rest = sp + 1;
+                            while (*rest == ' ') rest++;
+                            memmove(g_messageContent, rest, strlen(rest) + 1);
+                            BITCHAT_DEBUG_PRINTLN("Tag-routed message to %s", tag);
+                        }
+                    }
+                }
+
                 mesh::GroupChannel targetChannel;
                 if (!findMeshChannel(g_channelName, targetChannel)) {
                     BITCHAT_DEBUG_PRINTLN("Ignoring message to unmapped channel '%s'", g_channelName);
