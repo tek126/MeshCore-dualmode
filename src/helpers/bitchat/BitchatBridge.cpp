@@ -1132,12 +1132,17 @@ void BitchatBridge::processBitchatMessage(const BitchatMessage& msg) {
                 // Multi-bridge loop prevention: Check if message appears to be a MeshCore
                 // relay from another bridge. Format: "<senderName> message" indicates this
                 // message originated from MeshCore and was relayed to Bitchat by another bridge.
+                bool looksLikeEcho = false;
                 if (g_messageContent[0] == '<') {
                     const char* closeBracket = strchr(g_messageContent, '>');
-                    if (closeBracket != nullptr && closeBracket[1] == ' ') {
-                        BITCHAT_DEBUG_PRINTLN("Skipping relay - appears to be MeshCore echo from another bridge");
-                        break;
-                    }
+                    if (closeBracket != nullptr && closeBracket[1] == ' ') looksLikeEcho = true;
+                } else if (g_messageContent[0] == '[' && g_messageContent[1] == '#') {
+                    // tagged non-default-channel form: "[#chan] <sender> text"
+                    if (strstr(g_messageContent, "] <") != nullptr) looksLikeEcho = true;
+                }
+                if (looksLikeEcho) {
+                    BITCHAT_DEBUG_PRINTLN("Skipping relay - appears to be MeshCore echo from another bridge");
+                    break;
                 }
 
                 // Add to message history for REQUEST_SYNC responses
@@ -1899,34 +1904,32 @@ void BitchatBridge::onMeshcoreGroupMessage(const mesh::GroupChannel& channel, ui
 
     // Build message content: "<senderName> text". The angle-bracket wrapper is
     // load-bearing: other bridges hearing this over BLE use it to recognise a
-    // MeshCore echo and not relay it back onto their mesh.
-    // Use global buffer to avoid stack overflow on NRF52
-    snprintf(g_meshTxContent, sizeof(g_meshTxContent), "<%s> %s", senderName, text);
+    // MeshCore echo and not relay it back onto their mesh. Non-default
+    // channels get a "[#name]" tag in front instead of the TLV channel field:
+    // field-testing (2026-08-21) showed the app renders the plain broadcast
+    // form but not our TLV channel form (current BitChat's channel model is
+    // geohash-based), so tagged-in-main-chat is the form that actually works.
+    // Use member buffer to avoid stack overflow on NRF52
+    if (isDefaultChannel(chanName)) {
+        snprintf(g_meshTxContent, sizeof(g_meshTxContent), "<%s> %s", senderName, text);
+    } else {
+        snprintf(g_meshTxContent, sizeof(g_meshTxContent), "[#%s] <%s> %s", chanName, senderName, text);
+    }
     size_t contentLen = strlen(g_meshTxContent);
 
-    if (isDefaultChannel(chanName)) {
-        // Default channel: proven plain-text broadcast form (payload is just text)
-        g_msgBuffer.version = BITCHAT_VERSION;
-        g_msgBuffer.type = BITCHAT_MSG_MESSAGE;
-        g_msgBuffer.ttl = DEFAULT_TTL;
-        g_msgBuffer.timestamp = getCurrentTimeMs();
-        g_msgBuffer.flags = 0;  // No special flags - simple channel message
-        g_msgBuffer.setSenderId64(_bitchatPeerId);
+    // Proven plain-text broadcast form (payload is just text)
+    g_msgBuffer.version = BITCHAT_VERSION;
+    g_msgBuffer.type = BITCHAT_MSG_MESSAGE;
+    g_msgBuffer.ttl = DEFAULT_TTL;
+    g_msgBuffer.timestamp = getCurrentTimeMs();
+    g_msgBuffer.flags = 0;  // No special flags - simple channel message
+    g_msgBuffer.setSenderId64(_bitchatPeerId);
 
-        if (contentLen > BITCHAT_MAX_PAYLOAD_SIZE) {
-            contentLen = BITCHAT_MAX_PAYLOAD_SIZE;
-        }
-        memcpy(g_msgBuffer.payload, g_meshTxContent, contentLen);
-        g_msgBuffer.payloadLength = static_cast<uint16_t>(contentLen);
-    } else {
-        // Non-default channel: canonical TLV form with the channel field set,
-        // so the app files the message under the right hashtag channel
-        char chanWithHash[34];
-        snprintf(chanWithHash, sizeof(chanWithHash), "#%s", chanName);
-        BitchatProtocol::createChannelMessageTLV(
-            g_msgBuffer, _bitchatPeerId, _nodeName, chanWithHash,
-            g_meshTxContent, contentLen, getCurrentTimeMs(), DEFAULT_TTL);
+    if (contentLen > BITCHAT_MAX_PAYLOAD_SIZE) {
+        contentLen = BITCHAT_MAX_PAYLOAD_SIZE;
     }
+    memcpy(g_msgBuffer.payload, g_meshTxContent, contentLen);
+    g_msgBuffer.payloadLength = static_cast<uint16_t>(contentLen);
 
     // Sign the message
     signMessage(g_msgBuffer);
