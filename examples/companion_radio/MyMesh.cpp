@@ -3,6 +3,7 @@
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
 #include <helpers/TimeSanity.h>
+#include "LoopDiag.h"
 
 #ifdef WITH_MT_PRESENCE
 extern RADIO_CLASS radio;   // concrete RadioLib radio (defined in the variant target.cpp)
@@ -1854,6 +1855,19 @@ void MyMesh::handleCmdFrame(size_t len) {
         memcpy(dp, fv, fn); dp += fn;
       }
     }
+#if defined(ESP32)
+    // Loop-hang diagnostics, read-only: "<last reset>.<phase the loop was stuck
+    // in when the watchdog fired>.<rescues since power-on>" — see LoopDiag.h.
+    {
+      char dv[40];
+      int dn = snprintf(dv, sizeof(dv), "sys.diag:%s", loop_diag::summary());
+      bool need_comma2 = (dp != (char *)&out_frame[1]);
+      if (dn > 0 && (dp - (char *)out_frame) + (need_comma2 ? 1 : 0) + dn < MAX_FRAME_SIZE) {
+        if (need_comma2) *dp++ = ',';
+        memcpy(dp, dv, dn); dp += dn;
+      }
+    }
+#endif
 #ifdef WITH_MT_PRESENCE
     // Advertise the Meshtastic-presence settings as custom vars too, so they show
     // up (and are editable) in the phone app with no app-side changes. Bounded so
@@ -2335,6 +2349,7 @@ void MyMesh::loop() {
   // onto the air when the radio is idle, then restore the MeshCore PHY. The radio
   // is the phone's live link, so the retune only happens between packets.
   {
+    LOOP_DIAG_MARK(PRESENCE);
     // isInRecvMode() is false while a MeshCore transmit is in flight (already
     // dequeued, so hasPendingWork() no longer sees it). Without this the beacon
     // could retune the radio mid-transmit, aborting the send and wedging CAD.

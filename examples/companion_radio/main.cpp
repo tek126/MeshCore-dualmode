@@ -1,6 +1,7 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include "MyMesh.h"
+#include "LoopDiag.h"
 
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
@@ -120,6 +121,7 @@ void setup() {
 #endif
   Serial.begin(115200);
   board.begin();
+  LOOP_DIAG_BEGIN();
 
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.begin();
@@ -253,13 +255,20 @@ void cmp_loop() {
 #else
 void loop() {
 #endif
+  LOOP_DIAG_MARK(MESH);
   the_mesh.loop();
+  LOOP_DIAG_MARK(INTERFACES);
   interface_manager.loop();
+  LOOP_DIAG_MARK(SENSORS);
   sensors.loop();
 #ifdef DISPLAY_CLASS
+  LOOP_DIAG_MARK(UI);
   ui_task.loop();
 #endif
+  LOOP_DIAG_MARK(CLOCK);
   rtc_clock.tick();
+  LOOP_DIAG_MARK(IDLE);
+  LOOP_DIAG_FEED();
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.loop();
 #endif
