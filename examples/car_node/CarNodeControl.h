@@ -713,6 +713,8 @@ public:
   }
 
   bool enabled() const { return cfg.enabled; }
+  // 0 = no fix, 1 = driving, 2 = parked
+  uint8_t driveState() const { return drive_state; }
 
   // The repeater just flooded a MeshCore advert (periodic timer, CLI 'advert',
   // or our own park re-advert): have the chat text ride a Meshtastic burst

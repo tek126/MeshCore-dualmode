@@ -45,6 +45,46 @@ static int battPercent(uint16_t mv) {
 // a clock still sitting at its boot default has not been set
 static bool clockIsSet(uint32_t t) { return t > 1735689600UL; }   // 2025-01-01
 
+// ---------------- geo ----------------
+
+static const double DEG = 0.017453292519943295;
+
+static double distanceMeters(double lat1, double lon1, double lat2, double lon2) {
+  double dlat = (lat2 - lat1) * DEG, dlon = (lon2 - lon1) * DEG;
+  double a = sin(dlat / 2) * sin(dlat / 2) + cos(lat1 * DEG) * cos(lat2 * DEG) * sin(dlon / 2) * sin(dlon / 2);
+  return 6371000.0 * 2 * atan2(sqrt(a), sqrt(1 - a));
+}
+
+// initial bearing from point 1 to point 2, degrees clockwise from north
+static double bearingDegrees(double lat1, double lon1, double lat2, double lon2) {
+  double y = sin((lon2 - lon1) * DEG) * cos(lat2 * DEG);
+  double x = cos(lat1 * DEG) * sin(lat2 * DEG) - sin(lat1 * DEG) * cos(lat2 * DEG) * cos((lon2 - lon1) * DEG);
+  double b = atan2(y, x) / DEG;
+  return b < 0 ? b + 360 : b;
+}
+
+static void fmtDistance(char* buf, double m) {
+  if (m < 1000)        sprintf(buf, "%d m", (int)(m + 0.5));
+  else if (m < 10000)  sprintf(buf, "%.1f km", m / 1000);
+  else                 sprintf(buf, "%d km", (int)(m / 1000 + 0.5));
+}
+
+static const char* compassPoint(double b) {
+  static const char* P[] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+  return P[(int)((b + 22.5) / 45) % 8];
+}
+
+// filled arrow centred on (cx, cy), pointing at bearing (0 = up/north)
+static void drawArrow(Adafruit_GFX& g, int cx, int cy, int r, double bearing, uint16_t c) {
+  double a = bearing * DEG;
+  int tx = cx + (int)(r * sin(a)),             ty = cy - (int)(r * cos(a));
+  int lx = cx + (int)(r * 0.6 * sin(a + 2.5)), ly = cy - (int)(r * 0.6 * cos(a + 2.5));
+  int rx = cx + (int)(r * 0.6 * sin(a - 2.5)), ry = cy - (int)(r * 0.6 * cos(a - 2.5));
+  int nx = cx - (int)(r * 0.25 * sin(a)),      ny = cy + (int)(r * 0.25 * cos(a));   // notch
+  g.fillTriangle(tx, ty, lx, ly, nx, ny, c);
+  g.fillTriangle(tx, ty, rx, ry, nx, ny, c);
+}
+
 // ---------------- message store ----------------
 
 void UIMessageStore::add(uint32_t ts, uint8_t hops, bool channel, const char* from, const char* text) {
@@ -241,7 +281,11 @@ public:
   enum HomePage {
     FIRST,
     MESSAGES,
-    RECENT,
+    CAR,
+    NODES,
+#ifdef WITH_MT_PRESENCE
+    PRESENCE,
+#endif
     RADIO,
     BLUETOOTH,
     ADVERT,
@@ -262,6 +306,7 @@ private:
   mesh::RTCClock* _rtc;
   NodePrefs* _node_prefs;
   uint8_t _page;
+  uint8_t _car = 0;      // selected car on the CAR page
   bool _shutdown_init;
   AdvertPath recent[UI_RECENT_LIST_SIZE];
 #if UI_DISCOVER_SCREEN
@@ -275,7 +320,11 @@ private:
     switch (_page) {
       case FIRST:     return _node_prefs->node_name;
       case MESSAGES:  return "Messages";
-      case RECENT:    return "Heard";
+      case CAR:       return _task->num_cars > 1 ? "Cars" : "Car";
+      case NODES:     return "Nearby";
+#ifdef WITH_MT_PRESENCE
+      case PRESENCE:  return "Meshtastic";
+#endif
       case RADIO:     return "Radio";
       case BLUETOOTH: return "Bluetooth";
       case ADVERT:    return "Advert";
@@ -369,31 +418,163 @@ private:
     }
   }
 
-  void renderRecent(ST7789ColorDisplay& d) {
-    int n = the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
+  // Recently heard nodes; distance and direction when both ends have a position.
+  void renderNodes(ST7789ColorDisplay& d) {
+    the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
     uint32_t now = _rtc->getCurrentTime();
+    double mylat, mylon;
+    bool me = _task->getOwnPosition(mylat, mylon);
     d.setTextSize(1);
     int row = 0;
     for (int i = 0; i < UI_RECENT_LIST_SIZE; i++) {
       AdvertPath* a = &recent[i];
       if (a->name[0] == 0) continue;
-      char age[8], hops[8];
-      fmtAge(age, (int)(now - a->recv_timestamp));
-      int h = a->path_len & 63;
-      if (h == 0) strcpy(hops, "direct"); else sprintf(hops, "%d hop%s", h, h == 1 ? "" : "s");
       int y = ROW_Y(row++);
+      char age[8], info[16];
+      fmtAge(age, (int)(now - a->recv_timestamp));
       d.setColor(GREY);
       int aw = d.getTextWidth(age);
       d.drawTextRightAlign(SCREEN_W - 4, y, age);
-      d.setColor(h == 0 ? GREEN : LIGHT_GREY);
-      int hw = d.getTextWidth(hops);
-      d.drawTextRightAlign(SCREEN_W - 4 - aw - 10, y, hops);
+      int right = SCREEN_W - 4 - aw - 8;
+
+      ContactInfo* c = the_mesh.lookupContactByPubKey(a->pubkey_prefix, sizeof(a->pubkey_prefix));
+      if (me && c != NULL && (c->gps_lat != 0 || c->gps_lon != 0)) {
+        double lat = c->gps_lat / 1000000.0, lon = c->gps_lon / 1000000.0;
+        fmtDistance(info, distanceMeters(mylat, mylon, lat, lon));
+        d.setColor(WHITE);
+        int iw = d.getTextWidth(info);
+        d.drawTextRightAlign(right, y, info);
+        drawArrow(d.gfx(), right - iw - 9, y + 8, 7, bearingDegrees(mylat, mylon, lat, lon), CYAN);
+        right -= iw + 20;
+      } else {
+        int h = a->path_len & 63;
+        if (h == 0) strcpy(info, "direct"); else sprintf(info, "%d hop%s", h, h == 1 ? "" : "s");
+        d.setColor(h == 0 ? GREEN : LIGHT_GREY);
+        int iw = d.getTextWidth(info);
+        d.drawTextRightAlign(right, y, info);
+        right -= iw + 8;
+      }
       d.setColor(WHITE);
-      d.drawClipped(6, y, SCREEN_W - 4 - aw - 10 - hw - 8 - 6, a->name);
+      d.drawClipped(6, y, right - 6, a->name);
     }
-    (void)n;
     if (row == 0) drawHint(d, 50, "Nothing heard yet");
   }
+
+  // Find my car: direction and distance to the selected car node's parked spot.
+  void renderCar(ST7789ColorDisplay& d) {
+    if (_task->num_cars == 0) {
+      drawHint(d, 36, "No car node heard yet");
+      drawHint(d, 62, "Its next advert will show here");
+      return;
+    }
+    if (_car >= _task->num_cars) _car = 0;
+    UICar* car = &_task->cars[_car];
+    Adafruit_GFX& g = d.gfx();
+    const int cx = 50, cy = 76, r = 34;
+
+    char tmp[40];
+    double mylat, mylon;
+    bool me = _task->getOwnPosition(mylat, mylon);
+    g.drawCircle(cx, cy, r, DARK_GREY);
+    d.setTextSize(0);
+    d.setColor(GREY);
+    d.setCursor(cx - 2, cy - r + 3);
+    d.print("N");
+    double dist = 0, brg = 0;
+    if (me && car->has_loc) {
+      dist = distanceMeters(mylat, mylon, car->lat / 1000000.0, car->lon / 1000000.0);
+      brg = bearingDegrees(mylat, mylon, car->lat / 1000000.0, car->lon / 1000000.0);
+      if (dist < 25) {
+        g.fillCircle(cx, cy, 10, GREEN);              // you're there
+      } else {
+        drawArrow(g, cx, cy, r - 8, brg, ORANGE);
+      }
+    } else {
+      d.setTextSize(3);
+      d.setColor(GREY);
+      d.drawTextCentered(cx, cy - 17, "?");
+    }
+
+    const int tx = 98, tw = SCREEN_W - tx - 4;
+    d.setTextSize(2);
+    d.setColor(WHITE);
+    d.drawClipped(tx, 22, tw, car->name);
+
+    if (!car->has_loc) {
+      d.setTextSize(1);
+      d.setColor(GREY);
+      d.setCursor(tx, 48);
+      d.print("no location sent");
+    } else if (!me) {
+      d.setTextSize(1);
+      d.setColor(GREY);
+      d.drawClipped(tx, 44, tw, "Where am I?");
+      d.drawClipped(tx, 62, tw, "turn on GPS");
+    } else {
+      d.setTextSize(3);
+      d.setColor(WHITE);
+      fmtDistance(tmp, dist);
+      if (dist < 25) strcpy(tmp, "here");
+      d.drawClipped(tx, 42, tw, tmp);
+      if (dist >= 25) {
+        d.setTextSize(1);
+        d.setColor(LIGHT_GREY);
+        d.setCursor(tx, 76);
+        d.print(compassPoint(brg));
+        sprintf(tmp, "%d deg", (int)(brg + 0.5));
+        d.drawTextRightAlign(SCREEN_W - 4, 76, tmp);
+      }
+    }
+
+    char age[16];
+    fmtAge(age, (int)(_rtc->getCurrentTime() - car->heard_at));
+    if (strcmp(age, "now") == 0) strcpy(age, "just now"); else strcat(age, " ago");
+    d.setTextSize(1);
+    if (car->parked) {
+      d.setColor(GREEN);
+      sprintf(tmp, "parked, %s", age);
+    } else {
+      d.setColor(YELLOW);
+      sprintf(tmp, "moving, %s", age);
+    }
+    d.drawClipped(tx, 98, tw, tmp);
+    if (_task->num_cars > 1) {
+      d.setTextSize(0);
+      d.setColor(GREY);
+      sprintf(tmp, "%d/%d  long press: next car", _car + 1, _task->num_cars);
+      d.drawTextRightAlign(SCREEN_W - 4, 120, tmp);
+    }
+  }
+
+#ifdef WITH_MT_PRESENCE
+  // Meshtastic presence status; long press toggles it.
+  void renderPresence(ST7789ColorDisplay& d) {
+    const MtBeaconControl& b = the_mesh.getPresence();
+    char v[32];
+    drawKV(d, 0, "Presence", b.enabled() ? "on" : "off", b.enabled() ? GREEN : GREY);
+    long s = b.secsToNext();
+    if (s < 0) strcpy(v, "-");
+    else if (s < 60) sprintf(v, "in %lds", s);
+    else sprintf(v, "in %ldm %02lds", s / 60, s % 60);
+    drawKV(d, 1, "Next", v);
+    if (!b.positionOn() || b.precision() == 0) strcpy(v, "off");
+    else if (b.precision() >= 32) strcpy(v, "exact");
+    else {
+      double m = 23905787.9 / (double)(1UL << (b.precision() > 31 ? 31 : b.precision()));
+      char dist[16];
+      fmtDistance(dist, m);
+      sprintf(v, "within %s", dist);
+    }
+    drawKV(d, 2, "Position", v);
+    sprintf(v, "%s %s", b.regionName(), b.presetName());
+    drawKV(d, 3, "Channel", v);
+    const meshtastic::TxStats& tx = b.txStats();
+    uint32_t failed = tx.attempts - tx.delivered;
+    sprintf(v, "%lu ok  %lu failed", (unsigned long)tx.delivered, (unsigned long)failed);
+    drawKV(d, 4, "Sent", v, failed > 0 ? ORANGE : WHITE);
+    drawHint(d, 111, b.enabled() ? "long press: turn off" : "long press: turn on");
+  }
+#endif
 
   void renderRadio(ST7789ColorDisplay& d) {
     char v[32];
@@ -518,7 +699,11 @@ public:
     switch (_page) {
       case FIRST:    renderFirst(d); break;
       case MESSAGES: renderMessages(d); break;
-      case RECENT:   renderRecent(d); break;
+      case CAR:      renderCar(d); break;
+      case NODES:    renderNodes(d); break;
+#ifdef WITH_MT_PRESENCE
+      case PRESENCE: renderPresence(d); break;
+#endif
       case RADIO:    renderRadio(d); break;
       case BLUETOOTH: {
         bool on = _task->isBluetoothEnabled();
@@ -572,6 +757,17 @@ public:
         if (_task->messages.count() > 0) _task->openReader(0);
         else _task->showAlert("No messages yet", 800);
         return true;
+      case CAR:
+        if (_task->num_cars > 1) _car = (_car + 1) % _task->num_cars;
+        return true;
+#ifdef WITH_MT_PRESENCE
+      case PRESENCE: {
+        bool on = !the_mesh.getPresence().enabled();
+        bool ok = the_mesh.setPresenceVar("mt.presence", on ? "1" : "0");
+        _task->showAlert(!ok ? "Failed" : (on ? "Presence on" : "Presence off"), 800);
+        return true;
+      }
+#endif
       case BLUETOOTH:
         if (_task->isBluetoothEnabled()) _task->disableBluetooth();
         else _task->enableBluetooth();
@@ -810,6 +1006,47 @@ void UITask::onControlDataRecv(const mesh::Packet* packet) {
     ((HomeScreen *) home)->handleDiscoverResponse(packet);
   }
 #endif
+}
+
+void UITask::onCarNodeAdvert(const uint8_t* pub_key, const char* name, bool has_loc,
+                             int32_t lat_e6, int32_t lon_e6, bool parked, uint8_t hops) {
+  int i = 0;
+  while (i < num_cars && memcmp(cars[i].key, pub_key, sizeof(cars[i].key)) != 0) i++;
+  if (i == num_cars) {
+    if (num_cars < UI_MAX_CARS) {
+      num_cars++;
+    } else {   // full: replace the one heard longest ago
+      i = 0;
+      for (int j = 1; j < num_cars; j++) if (cars[j].heard_at < cars[i].heard_at) i = j;
+    }
+    memcpy(cars[i].key, pub_key, sizeof(cars[i].key));
+  }
+  UICar* c = &cars[i];
+  StrHelper::strncpy(c->name, name, sizeof(c->name));
+  c->has_loc = has_loc && (lat_e6 != 0 || lon_e6 != 0);
+  c->lat = lat_e6;
+  c->lon = lon_e6;
+  c->parked = parked;
+  c->hops = hops;
+  c->heard_at = rtc_clock.getCurrentTime();
+  _next_refresh = 100;
+}
+
+bool UITask::getOwnPosition(double& lat, double& lon) {
+#if ENV_INCLUDE_GPS == 1
+  LocationProvider* nmea = sensors.getLocationProvider();
+  if (nmea != NULL && getGPSState() && nmea->isValid()) {
+    lat = nmea->getLatitude() / 1000000.0;
+    lon = nmea->getLongitude() / 1000000.0;
+    return true;
+  }
+#endif
+  if (sensors.node_lat != 0 || sensors.node_lon != 0) {   // set in the app
+    lat = sensors.node_lat;
+    lon = sensors.node_lon;
+    return true;
+  }
+  return false;
 }
 
 void UITask::userLedHandler() {

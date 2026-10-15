@@ -488,6 +488,13 @@ public:
   bool     positionOn() const { return cfg.send_position; }
   const char* regionName() const { return meshtastic::REGIONS[cfg.region_idx].name; }
   const char* presetName() const { return meshtastic::PRESETS[cfg.preset_idx].name; }
+  // seconds until the next scheduled presence burst (-1 = off)
+  long secsToNext() const {
+    if (!cfg.enabled) return -1;
+    int32_t d = (int32_t)(next_due - millis());
+    return d > 0 ? d / 1000 : 0;
+  }
+  const meshtastic::TxStats& txStats() const { return tx; }
 
   // The repeater just flooded a MeshCore advert: have the chat text ride a
   // beacon burst shortly after, so the Meshtastic text follows the repeater's

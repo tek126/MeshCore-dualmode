@@ -65,6 +65,19 @@ public:
   void markAllRead();
 };
 
+// Car nodes heard recently (from the FEAT2 advert marker). RAM only.
+#define UI_MAX_CARS  4
+
+struct UICar {
+  uint8_t  key[8];      // pub_key prefix
+  char     name[32];
+  bool     has_loc;
+  int32_t  lat, lon;    // last parked position, 6 decimal places
+  bool     parked;      // still parked there (as of its last advert)
+  uint8_t  hops;
+  uint32_t heard_at;    // our clock
+};
+
 class UITask : public AbstractUITask {
   DisplayDriver* _display;
   SensorManager* _sensors;
@@ -98,6 +111,8 @@ class UITask : public AbstractUITask {
 
 public:
   UIMessageStore messages;
+  UICar cars[UI_MAX_CARS];
+  int num_cars = 0;
 
   UITask(mesh::MainBoard* board, MultiSerialInterface* serial) : AbstractUITask(board, serial), _display(NULL), _sensors(NULL) {
     next_batt_chck = _next_refresh = 0;
@@ -133,6 +148,11 @@ public:
   void onQueueSizeChanged(int offline_queue_size) override;
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
   void onControlDataRecv(const mesh::Packet* pkt) override;
+  void onCarNodeAdvert(const uint8_t* pub_key, const char* name, bool has_loc,
+                       int32_t lat_e6, int32_t lon_e6, bool parked, uint8_t hops) override;
+
+  // where this companion is: GPS fix, else the location set in the app
+  bool getOwnPosition(double& lat, double& lon);
 
   // from AbstractUITask
   void notify(UIEventType t = UIEventType::none) override;

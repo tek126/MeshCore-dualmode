@@ -113,6 +113,10 @@ public:
       virtual void onTraceRecv(mesh::Packet *pkt, uint32_t tag, uint32_t auth_code, uint8_t flags,
                                const uint8_t *path_snrs, const uint8_t *path_hashes, uint8_t path_len) { }
       virtual void onRawDataRecv(mesh::Packet *pkt) { }
+      // an advert from a car node (FEAT2 marker, see helpers/CarNodeAdvert.h);
+      // lat/lon is where it last parked, parked = still there
+      virtual void onCarNodeAdvert(const uint8_t* pub_key, const char* name, bool has_loc,
+                                   int32_t lat_e6, int32_t lon_e6, bool parked, uint8_t hops) { }
       virtual ~Listener() { }
   };
 
@@ -133,8 +137,13 @@ public:
   void enterCLIRescue();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
+#ifdef WITH_MT_PRESENCE
+  const MtBeaconControl& getPresence() const { return _beacon; }
+  bool setPresenceVar(const char* name, const char* value) { char r[160]; return applyPresenceVar(name, value, r); }
+#endif
 
 protected:
+  void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override;
   float getAirtimeBudgetFactor() const override;
   int getInterferenceThreshold() const override;
   bool getCADEnabled() const override;

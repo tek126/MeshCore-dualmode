@@ -330,5 +330,5 @@ public:
   void loadPrefs(FILESYSTEM* _fs);
   bool savePrefs(FILESYSTEM* _fs);
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
-  uint8_t buildAdvertData(uint8_t node_type, uint8_t* app_data);
+  uint8_t buildAdvertData(uint8_t node_type, uint8_t* app_data, uint16_t feat2 = 0);
 };

@@ -7,6 +7,8 @@
 #include <Mesh.h>
 #include <helpers/TimeSanity.h>
 #include <helpers/LoopDiag.h>
+#include <helpers/CarNodeAdvert.h>
+#include <helpers/AdvertDataHelpers.h>
 
 #ifdef WITH_MT_PRESENCE
 extern RADIO_CLASS radio;   // concrete RadioLib radio (defined in the variant target.cpp)
@@ -2561,6 +2563,20 @@ bool MyMesh::applyPresenceVar(const char* name, const char* value, char* reply) 
   return _beacon.handleCommand(cmd, reply, fs) && strncmp(reply, "Error", 5) != 0;
 }
 #endif
+
+// Stock advert handling, then tell the UI about car nodes (whether or not they
+// are, or get added as, contacts).
+void MyMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) {
+  BaseChatMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
+  if (_listener == NULL || app_data_len == 0) return;
+  AdvertDataParser parser(app_data, app_data_len);
+  if (parser.isValid() && parser.hasName() && carNodeAdvert(parser.getFeat2())) {
+    uint8_t hops = packet->isRouteFlood() ? packet->getPathHashCount() : 0;
+    _listener->onCarNodeAdvert(id.pub_key, parser.getName(), parser.hasLatLon(),
+                               parser.getIntLat(), parser.getIntLon(),
+                               (parser.getFeat2() & CARNODE_ADV_PARKED) != 0, hops);
+  }
+}
 
 bool MyMesh::advert() {
   mesh::Packet* pkt;

@@ -3,6 +3,7 @@
 #include <helpers/LoopDiag.h>
 #include <algorithm>
 #include <helpers/TimeSanity.h>
+#include <helpers/CarNodeAdvert.h>
 
 #if defined(WITH_MT_BEACON) || defined(WITH_CAR_NODE)
 extern RADIO_CLASS radio;   // concrete RadioLib radio (defined in the variant target.cpp)
@@ -420,7 +421,16 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
 
 mesh::Packet *MyMesh::createSelfAdvert() {
   uint8_t app_data[MAX_ADVERT_DATA_SIZE];
+#ifdef WITH_CAR_NODE
+  // mark the advert as a car node's, so our companions can show where it parked
+  uint16_t feat2 = 0;
+  if (_carnode.enabled()) {
+    feat2 = CARNODE_ADV_MAGIC | (_carnode.driveState() == 2 ? CARNODE_ADV_PARKED : 0);
+  }
+  uint8_t app_data_len = _cli.buildAdvertData(ADV_TYPE_REPEATER, app_data, feat2);
+#else
   uint8_t app_data_len = _cli.buildAdvertData(ADV_TYPE_REPEATER, app_data);
+#endif
 
   return createAdvert(self_id, app_data, app_data_len);
 }
