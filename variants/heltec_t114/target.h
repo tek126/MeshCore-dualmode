@@ -11,7 +11,9 @@
 
 #ifdef DISPLAY_CLASS
 #include <helpers/ui/MomentaryButton.h>
-#ifdef HELTEC_T114_WITH_DISPLAY
+#if defined(ST7789_COLOR)
+#include <helpers/ui/ST7789ColorDisplay.h>
+#elif defined(HELTEC_T114_WITH_DISPLAY)
 #include <helpers/ui/ST7789Display.h>
 #else
 #include "helpers/ui/NullDisplayDriver.h"
