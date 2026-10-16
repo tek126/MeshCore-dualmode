@@ -13,7 +13,7 @@ GPS-driven one.
 
 **Get it:** prebuilt firmware + flashing instructions at
 [alexdowney.net/carnode](https://alexdowney.net/carnode/) · source on the
-[`carnode` branch](https://github.com/tek126/MeshCore-mtbeacon/tree/carnode).
+[MeshCore-Carpeater](https://github.com/tek126/MeshCore-Carpeater) repo.
 
 ## What's different from mtbeacon
 
@@ -31,6 +31,20 @@ GPS-driven one.
 `-D WITH_CAR_NODE`, like the beacon's `-D WITH_MT_BEACON`. The two can operate
 together (separate configuration, separate commands). The interop headers stay in
 one place in `meshtastic_beacon`, with `-I examples/meshtastic_beacon`.
+
+## Find my car (companion screen)
+
+Every advert from a car node carries a small marker in the advert's FEAT2
+field (`0xCA00`, plus a "parked" bit; see `src/helpers/CarNodeAdvert.h`). The
+advert's location is always where the car last parked. Stock MeshCore nodes
+read and ignore the field. The marker costs 2 bytes of advert space, so the
+advertised name is limited to 21 bytes when a location is included.
+
+The Heltec T114 companion with the colour screen
+(`Heltec_t114_companion_radio_ble_mtpresence_tft`) uses it: its **Car** page
+shows an arrow (north up), the distance and the compass point to where the car
+parked, and whether the car is still there. The companion needs its own
+position: GPS on, or a location set in the app.
 
 ## Building
 
