@@ -1527,8 +1527,11 @@ void MyMesh::loop() {
     // Live fix from the sensor manager's GPS, falling back to configured location.
     LocationProvider* loc = sensors.getLocationProvider();
     if (loc && loc->isValid()) {
-      ctx.lat = sensors.node_lat;   // degrees, kept live by EnvironmentSensorManager::loop()
-      ctx.lon = sensors.node_lon;
+      // read the fix itself: sensors.node_lat/lon is only refreshed on the sensor
+      // manager's own schedule, so right after the first valid fix it can still
+      // hold 0,0 (or an old position) -- which then became the park anchor
+      ctx.lat = loc->getLatitude() / 1000000.0;
+      ctx.lon = loc->getLongitude() / 1000000.0;
       ctx.gps_valid = true;
     } else {
       ctx.lat = _prefs.node_lat;

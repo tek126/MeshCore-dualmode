@@ -1182,7 +1182,14 @@ public:
     // Runs before the early returns so the filter stays warm through holds
     // and `carnode zone add` can capture the current spot even while disabled.
     Context fc = c;
-    fix_filtered = c.gps_valid && filterFix(now, c.lat, c.lon, fc.lat, fc.lon);
+    // A "valid" fix at 0,0 (or out of range) is a receiver still cold-starting,
+    // not a position: treat it as no fix, so it never reaches the filter, the
+    // park anchor or a broadcast.
+    if (fc.gps_valid && (fc.lat < -90 || fc.lat > 90 || fc.lon < -180 || fc.lon > 180
+                         || (fabs(fc.lat) < 0.001 && fabs(fc.lon) < 0.001))) {
+      fc.gps_valid = false;
+    }
+    fix_filtered = fc.gps_valid && filterFix(now, fc.lat, fc.lon, fc.lat, fc.lon);
     cur_fix_valid = fc.gps_valid;
     if (fc.gps_valid) { cur_lat = fc.lat; cur_lon = fc.lon; }
 
@@ -1210,7 +1217,11 @@ public:
     // neither re-anchors nor resets the parked/sleep clock.
     bool park_event = false;
     if (cfg.enabled && fc.gps_valid) {
-      if (!have_anchor) {
+      if (!have_anchor && !fix_filtered) {
+        // first fix: wait for the median filter to warm up (3 samples, ~10 s)
+        // so one bad cold-start fix can't become the anchor
+        drive_state = 0;
+      } else if (!have_anchor) {
         anchor_lat = fc.lat; anchor_lon = fc.lon; stationary_since = now;
         have_anchor = true; park_reported = false; drive_state = 1;
         outside_since = 0; last_dist_m = 0; in_zone = -1;
