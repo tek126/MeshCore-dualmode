@@ -101,11 +101,11 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
 // timed login, request and CLI command after that looks like a replay -- for
 // good, because the ACL is persisted. Treat an implausible stored value as "no
 // history", and refuse to accept (and so store) an implausible new one.
-// TEMPORARY field diagnostic: one serial line per login / request / CLI command
-// saying what the repeater decided and why (never the password). Remove once
-// the V4 login failure is understood.
+// Field diagnostic, off by default: build with -D AUTH_TRACE=1 for one serial
+// line per login / request / CLI command saying what the repeater decided and
+// why (never the password). Used to find the far-future-timestamp lockout.
 #ifndef AUTH_TRACE
-  #define AUTH_TRACE 1
+  #define AUTH_TRACE 0
 #endif
 #if AUTH_TRACE
   #define AUTH_LOG(...) Serial.printf(__VA_ARGS__)
